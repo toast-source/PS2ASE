@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Ase-PS Bridge Metadata Schema v1",
+  "type": "object",
+  "required": ["version", "layers", "source"],
+  "properties": {
+    "version": { "type": "string", "description": "Schema version (e.g., '1.0.0')" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "source": {
+      "type": "object",
+      "properties": {
+        "app": { "type": "string" },
+        "canvas": {
+          "type": "object",
+          "properties": {
+            "width": { "type": "integer" },
+            "height": { "type": "integer" }
+          }
+        }
+      }
+    },
+    "layers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "bounds", "file"],
+        "properties": {
+          "name": { "type": "string" },
+          "opacity": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "visible": { "type": "boolean" },
+          "bounds": {
+            "type": "object",
+            "required": ["x", "y", "width", "height"],
+            "properties": {
+              "x": { "type": "integer" },
+              "y": { "type": "integer" },
+              "width": { "type": "integer" },
+              "height": { "type": "integer" }
+            }
+          },
+          "file": { "type": "string" }
+        }
+      }
+    }
+  }
+}
