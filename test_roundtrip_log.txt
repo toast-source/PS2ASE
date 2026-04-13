@@ -1,0 +1,1 @@
+Step 1: Aseprite Export Complete. StatusBar: 3개 레이어가 브릿지 클립보드에 복사되었습니다.

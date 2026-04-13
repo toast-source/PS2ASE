@@ -1,0 +1,3 @@
+Bounds: x=10, y=10, w=1, h=1
+Test 1 (0, 0) Pixel Value: 4278190335
+Test 2 (-x, -y) Pixel Value: 0
