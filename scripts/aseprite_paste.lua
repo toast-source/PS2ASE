@@ -1,12 +1,9 @@
 -- scripts/aseprite_paste.lua
 -- Ase-PS Bridge Pro - Paste Action (Aseprite)
+-- 지원: Layer/Group 계층(Tree) 구조 완벽 전송 및 평면(Flat) 레이어 덮어쓰기
 
 local function decodeJson(str)
-    -- Aseprite 내장 json.decode 또는 대체 파서 처리
-    if type(json) == "table" and json.decode then
-        return json.decode(str)
-    end
-    -- Fallback: 극단적으로 단순화된 패턴 매칭 (에러 대비)
+    if type(json) == "table" and json.decode then return json.decode(str) end
     local obj = {}
     obj.signature = str:match('"signature"%s*:%s*"([^"]+)"')
     obj.job_path = str:match('"job_path"%s*:%s*"([^"]+)"')
@@ -17,21 +14,18 @@ local function showMessage(msg)
     app.alert({ title="Bridge Paste", text=msg, buttons={"OK"} })
 end
 
--- 1. 활성 스프라이트 확인 (선택 사항: 없으면 새로 만들 수도 있지만 현재 문서에 붙여넣는 UX)
 local spr = app.activeSprite
 if not spr then
     showMessage("붙여넣기할 활성 문서가 없습니다. 새 문서를 열고 실행해주세요.")
     return
 end
 
--- 2. OS 클립보드 검사
 local clipboardText = ""
 if app.clipboard and app.clipboard.text then
     clipboardText = app.clipboard.text
 end
 
 if not clipboardText or clipboardText == "" then
-    -- Fallback: powershell을 이용하여 OS 클립보드 직접 읽기
     local handle = io.popen("powershell.exe -NoProfile -Command \"Get-Clipboard\"")
     if handle then
         clipboardText = handle:read("*a")
@@ -40,210 +34,274 @@ if not clipboardText or clipboardText == "" then
 end
 
 if not clipboardText or clipboardText:match("^%s*$") then
-    showMessage("클립보드가 비어있습니다. Photoshop에서 복사를 먼저 실행해주세요.")
+    showMessage("클립보드가 비어있습니다. 포토샵에서 복사를 먼저 실행해주세요.")
     return
 end
 
--- 3. Payload 검증
 local payload = decodeJson(clipboardText)
-if not payload or payload.signature ~= "ase_ps_bridge_payload" then
-    showMessage("브릿지 데이터가 클립보드에 없습니다.\n일반 텍스트이거나 Photoshop에서 Bridge Copy를 실행하지 않았습니다.")
-    return
-end
+if not payload or payload.signature ~= "ase_ps_bridge_payload" then return end
 
 local jobPath = payload.job_path
-if not jobPath then
-    showMessage("Payload에 job_path가 누락되었습니다.")
-    return
-end
+if not jobPath then return end
 
--- 4. 메타데이터 로드
+-- Debug Logger
+local function writeLog(msg)
+    local f = io.open(jobPath .. "/debug_ase_paste.log", "a")
+    if f then
+        f:write(msg .. "\n")
+        f:close()
+    end
+end
+os.remove(jobPath .. "/debug_ase_paste.log")
+writeLog("=== Aseprite Paste Debug Log ===")
+writeLog("Align Mode: " .. tostring(payload.settings and payload.settings.align_mode))
+
 local metaFile = io.open(jobPath .. "/metadata.json", "r")
 if not metaFile then
-    showMessage("임시 전송 데이터가 삭제되었거나 만료되었습니다.\n(" .. jobPath .. ")")
+    showMessage("임시 전송 데이터가 삭제되었거나 만료되었습니다.")
     return
 end
 local metaContent = metaFile:read("*all")
 metaFile:close()
 
--- 포토샵 캔버스 사이즈 추출 (더 이상 전체 캔버스 중앙 정렬 기준이 아님, 참고용)
-local ps_w = tonumber(metaContent:match('"canvas_size".-"w"%s*:%s*(%d+)')) or spr.width
-local ps_h = tonumber(metaContent:match('"canvas_size".-"h"%s*:%s*(%d+)')) or spr.height
-
--- 5. 레이어 데이터 파싱 및 Bounding Box 계산
-local layersData = {}
-local minX, minY, maxX, maxY
-
--- Aseprite 내장 JSON 모듈을 우선 사용하여 특수문자/따옴표 파싱 에러 원천 차단
-local parsedMeta = nil
+local metadata = nil
 if type(json) == "table" and json.decode then
-    parsedMeta = json.decode(metaContent)
+    metadata = json.decode(metaContent)
 end
 
-if parsedMeta and parsedMeta.layers then
-    for _, lData in ipairs(parsedMeta.layers) do
-        local lx = tonumber(lData.x) or 0
-        local ly = tonumber(lData.y) or 0
-        local fullImagePath = jobPath .. "/" .. lData.file
-        table.insert(layersData, {
-            name = lData.name or "Layer",
-            x = lx,
-            y = ly,
-            op = tonumber(lData.opacity) or 100,
-            file = lData.file,
-            fullImagePath = fullImagePath
-        })
-    end
-else
-    -- Fallback: JSON 모듈이 없는 구버전 환경을 위한 정규식
-    for name, x, y, op, vis, file in metaContent:gmatch('"name"%s*:%s*"([^"]*)",%s*"x"%s*:%s*(%-?%d+),%s*"y"%s*:%s*(%-?%d+).-"opacity"%s*:%s*(%d+),%s*"visible"%s*:%s*(%w+).-"file"%s*:%s*"([^"]+)"') do
-        local lx = tonumber(x) or 0
-        local ly = tonumber(y) or 0
-        local fullImagePath = jobPath .. "/" .. file
-        
-        table.insert(layersData, {
-            name = name,
-            x = lx,
-            y = ly,
-            op = tonumber(op) or 100,
-            file = file,
-            fullImagePath = fullImagePath
-        })
-    end
-end
-
-if #layersData == 0 then
-    showMessage("붙여넣을 레이어 데이터가 없습니다.")
+if not metadata then
+    showMessage("메타데이터 파싱 실패.")
     return
 end
 
--- 이미지 크기를 읽어 전체 콘텐츠의 최소/최대 Bounding Box 구하기
-for i = 1, #layersData do
-    local lData = layersData[i]
-    local imgFile = io.open(lData.fullImagePath, "rb")
-    if imgFile then
-        imgFile:close()
-        local importedImage = Image{ fromFile = lData.fullImagePath }
-        if importedImage then
-            lData.img = importedImage -- 이미지 객체 캐싱
-            local lw, lh = importedImage.width, importedImage.height
-            if not minX or lData.x < minX then minX = lData.x end
-            if not minY or lData.y < minY then minY = lData.y end
-            if not maxX or (lData.x + lw) > maxX then maxX = lData.x + lw end
-            if not maxY or (lData.y + lh) > maxY then maxY = lData.y + lh end
+local elementsList = metadata.elements or metadata.layers
+if not elementsList or #elementsList == 0 then
+    showMessage("붙여넣을 데이터가 없습니다.")
+    return
+end
+
+local alignMode = "center"
+if payload.settings and payload.settings.align_mode then
+    alignMode = payload.settings.align_mode
+end
+
+-- 1. [공통] 전략 분기점 판별: 그룹이 하나라도 있는지 확인
+local hasGroup = false
+for i = 1, #elementsList do
+    if elementsList[i].type == "group" then
+        hasGroup = true
+        break
+    end
+end
+writeLog("Has Group: " .. tostring(hasGroup))
+
+-- 2. [공통] Bounding Box 기반 Offset 계산 (그룹 제외, 보이는 레이어 중심)
+local minX, minY, maxX, maxY
+-- 1차 시도: 눈이 켜져 있는(visible) 레이어만으로 Bounding Box 계산 (배경 등 숨긴 레이어 때문에 중심축이 어긋나는 현상 방지)
+for i = 1, #elementsList do
+    local el = elementsList[i]
+    if el.type ~= "group" and el.visible ~= false then
+        local cx = tonumber(el.x) or 0
+        local cy = tonumber(el.y) or 0
+        local cRight = cx + (tonumber(el.width) or 0)
+        local cBottom = cy + (tonumber(el.height) or 0)
+
+        if not minX or cx < minX then minX = cx end
+        if not minY or cy < minY then minY = cy end
+        if not maxX or cRight > maxX then maxX = cRight end
+        if not maxY or cBottom > maxY then maxY = cBottom end
+    end
+end
+
+-- 만약 모든 레이어가 숨김 처리되어 있다면 전체 레이어로 2차 계산
+if minX == nil then
+    for i = 1, #elementsList do
+        local el = elementsList[i]
+        if el.type ~= "group" then
+            local cx = tonumber(el.x) or 0
+            local cy = tonumber(el.y) or 0
+            local cRight = cx + (tonumber(el.width) or 0)
+            local cBottom = cy + (tonumber(el.height) or 0)
+
+            if not minX or cx < minX then minX = cx end
+            if not minY or cy < minY then minY = cy end
+            if not maxX or cRight > maxX then maxX = cRight end
+            if not maxY or cBottom > maxY then maxY = cBottom end
         end
     end
 end
 
--- 전체 픽셀 콘텐츠 덩어리의 크기
-local contentWidth = (maxX or 0) - (minX or 0)
-local contentHeight = (maxY or 0) - (minY or 0)
+writeLog("Bounding Box - minX: " .. tostring(minX) .. ", minY: " .. tostring(minY) .. ", maxX: " .. tostring(maxX) .. ", maxY: " .. tostring(maxY))
 
--- Aseprite 캔버스 정중앙에 콘텐츠를 맞추기 위한 보정값 (Offset)
-local offsetX = math.floor((spr.width - contentWidth) / 2) - (minX or 0)
-local offsetY = math.floor((spr.height - contentHeight) / 2) - (minY or 0)
+local offsetX, offsetY = 0, 0
+if minX ~= nil and alignMode ~= "absolute" then
+    local contentWidth = maxX - minX
+    local contentHeight = maxY - minY
+    local psCanvasW = (metadata.canvas_size and metadata.canvas_size.w) or contentWidth
+    local psCanvasH = (metadata.canvas_size and metadata.canvas_size.h) or contentHeight
+    
+    offsetX = math.floor((spr.width - contentWidth) / 2) - minX
+    offsetY = math.floor((spr.height - contentHeight) / 2) - minY
+    
+    writeLog("Calculated - contentWidth: " .. contentWidth .. ", contentHeight: " .. contentHeight)
+    writeLog("Offsets - offsetX: " .. offsetX .. ", offsetY: " .. offsetY)
+end
 
--- 6. 레이어 재구성 (Transaction으로 묶어 한번에 실행 및 취소 지원)
 local importedCount = 0
 local frame = app.activeFrame or 1
 
--- Aseprite의 그룹 레이어(isGroup)를 제외한 순수 그리기 레이어만 추출
-local flatLayers = {}
-for _, l in ipairs(spr.layers) do
-    if not l.isGroup then
-        table.insert(flatLayers, l)
-    end
-end
-
--- 덮어씌울 타겟 레이어들을 미리 수집
-local targetLayers = {}
-local selLayers = {}
-local selCount = 0
-
-if app.range and app.range.layers then
-    for _, l in ipairs(app.range.layers) do
-        if not l.isGroup then 
-            selLayers[l] = true 
-            selCount = selCount + 1
-        end
-    end
-end
-
-if selCount == #layersData then
-    -- 1. 사용자가 레이어 갯수를 딱 맞춰서 다중 선택한 경우
-    for _, l in ipairs(flatLayers) do
-        if selLayers[l] then table.insert(targetLayers, l) end
-    end
-else
-    -- 2. 단일 선택이거나 갯수가 안 맞는 경우, 기존 레이어를 '최대한' 재사용
-    local activeIdx = 1
-    if app.activeLayer and not app.activeLayer.isGroup then
-        for i, l in ipairs(flatLayers) do
-            if l == app.activeLayer then
-                activeIdx = i
-                break
-            end
-        end
-    end
-    
-    local startIdx = activeIdx
-    
-    -- 선택한 레이어 위쪽으로 공간이 부족하다면, 시작점을 아래로 끌어내림
-    -- (목표: 기존 레이어 개수가 충분하다면 절대 새 레이어를 만들지 않음)
-    if startIdx + #layersData - 1 > #flatLayers then
-        startIdx = #flatLayers - #layersData + 1
-        if startIdx < 1 then startIdx = 1 end
-    end
-    
-    for i = 1, #layersData do
-        local l = flatLayers[startIdx + i - 1]
-        if l then
-            table.insert(targetLayers, l)
-        else
-            break -- 여전히 부족하면 여기서 break (이후에 새 레이어 생성)
-        end
-    end
-end
-
 app.transaction(function()
-    for i = 1, #layersData do
-        local lData = layersData[i]
-        local targetLayer = targetLayers[i]
+
+    if not hasGroup then
+        -- ==========================================
+        -- 분기 1: Legacy Flat Overwrite Mode
+        -- 그룹이 없으면 기존 레이어를 덮어씌움
+        -- ==========================================
         
-        -- 핵심 Fallback: 모든 기존 레이어를 끌어다 썼는데도 모자랄 때만 새 레이어 추가
-        if not targetLayer then
-            targetLayer = spr:newLayer()
-            -- 포토샵의 레이어 이름을 복사하지 않고 기본 이름 유지
-            table.insert(targetLayers, targetLayer)
+        -- 순수 그리기 레이어만 추출 (그룹 내부에 있는 레이어도 모두 수집)
+        local flatLayers = {}
+        local function collectFlat(layersCollection)
+            for _, l in ipairs(layersCollection) do
+                if not l.isGroup then table.insert(flatLayers, l) end
+                if l.isGroup then collectFlat(l.layers) end
+            end
         end
+        collectFlat(spr.layers)
+
+        local targetLayers = {}
         
-        if lData.img then
-            targetLayer.opacity = math.floor(lData.op * 2.55)
+        -- 단일 선택 또는 미선택 (자동 공간 유추 - Active Layer 기준 아래로 덮어쓰기)
+        local activeIdx = #flatLayers -- 선택이 없으면 캔버스의 가장 위쪽 레이어부터
+        if app.activeLayer and not app.activeLayer.isGroup then
+            for i, l in ipairs(flatLayers) do
+                if l == app.activeLayer then
+                    activeIdx = i
+                    break
+                end
+            end
+        end
+
+        -- 포토샵에서 가져온 레이어 뭉치 중 '가장 위쪽(Top) 레이어'가 현재 Aseprite의 Active Layer에 안착하도록,
+        -- 시작점(Bottom)을 Active Layer보다 아래쪽으로 계산하여 내려갑니다.
+        local bottomIdx = activeIdx - #elementsList + 1
+
+        -- 만약 아래쪽으로 덮어쓸 레이어가 모자라다면 (1번 레이어보다 밑으로 뚫고 내려갈 경우),
+        -- 어쩔 수 없이 1번 레이어부터 위로 채워넣도록 방어합니다.
+        if bottomIdx < 1 then 
+            bottomIdx = 1 
+        end
+
+        for i = 1, #elementsList do
+            local l = flatLayers[bottomIdx + i - 1]
+            if l then table.insert(targetLayers, l) end
+        end
+
+        for i = 1, #elementsList do
+            local el = elementsList[i]
+            local targetLayer = targetLayers[i]
             
-            local finalX = lData.x + offsetX
-            local finalY = lData.y + offsetY
-            
-            local existingCel = targetLayer:cel(frame.frameNumber or 1)
-            if existingCel then
-                spr:deleteCel(existingCel)
+            if not targetLayer then
+                targetLayer = spr:newLayer()
             end
             
-            spr:newCel(targetLayer, frame, lData.img, Point(finalX, finalY))
-            importedCount = importedCount + 1
+            local fullImagePath = jobPath .. "/" .. el.file
+            local imgFile = io.open(fullImagePath, "rb")
+            if imgFile then
+                imgFile:close()
+                local img = Image{ fromFile = fullImagePath }
+                if img then
+                    targetLayer.opacity = math.floor((tonumber(el.opacity) or 100) * 2.55)
+                    
+                    local existingCel = targetLayer:cel(frame.frameNumber)
+                    if existingCel then spr:deleteCel(existingCel) end
+                    
+                    local finalX = (tonumber(el.x) or 0) + offsetX
+                    local finalY = (tonumber(el.y) or 0) + offsetY
+                    if alignMode == "absolute" then
+                        finalX = tonumber(el.x) or 0
+                        finalY = tonumber(el.y) or 0
+                    end
+                    
+                    spr:newCel(targetLayer, frame, img, Point(finalX, finalY))
+                    importedCount = importedCount + 1
+                end
+            end
         end
+
+    else
+        -- ==========================================
+        -- 분기 2: Hierarchy Reconstruct Mode
+        -- 그룹이 있으면 안전하게 통째로 새 트리 생성
+        -- ==========================================
+        local treeMap = {}
+        for i = 1, #elementsList do
+            local el = elementsList[i]
+            local pId = el.parent_id or "root"
+            if not treeMap[pId] then treeMap[pId] = {} end
+            table.insert(treeMap[pId], el)
+        end
+
+        for pId, children in pairs(treeMap) do
+            table.sort(children, function(a, b)
+                local idxA = tonumber(a.index) or 0
+                local idxB = tonumber(b.index) or 0
+                return idxA < idxB
+            end)
+        end
+
+        local function buildHierarchy(parentId, targetParentObj)
+            local children = treeMap[parentId]
+            if not children then return end
+            
+            for i = 1, #children do
+                local el = children[i]
+                local newObj = nil
+                
+                if el.type == "group" then
+                    newObj = spr:newGroup()
+                    newObj.name = el.name
+                    newObj.opacity = math.floor((tonumber(el.opacity) or 100) * 2.55)
+                    if targetParentObj ~= spr then newObj.parent = targetParentObj end
+                    buildHierarchy(el.id, newObj)
+                else
+                    local fullImagePath = jobPath .. "/" .. el.file
+                    local imgFile = io.open(fullImagePath, "rb")
+                    if imgFile then
+                        imgFile:close()
+                        local importedImage = Image{ fromFile = fullImagePath }
+                        if importedImage then
+                            newObj = spr:newLayer()
+                            newObj.name = el.name or "Layer"
+                            newObj.opacity = math.floor((tonumber(el.opacity) or 100) * 2.55)
+                            if targetParentObj ~= spr then newObj.parent = targetParentObj end
+                            
+                            local finalX = (tonumber(el.x) or 0) + offsetX
+                            local finalY = (tonumber(el.y) or 0) + offsetY
+                            if alignMode == "absolute" then
+                                finalX = tonumber(el.x) or 0
+                                finalY = tonumber(el.y) or 0
+                            end
+                            
+                            spr:newCel(newObj, frame, importedImage, Point(finalX, finalY))
+                            importedCount = importedCount + 1
+                        end
+                    end
+                end
+            end
+        end
+
+        buildHierarchy("root", spr)
     end
 end)
 
 app.refresh()
 
--- 6. UX 피드백
 if importedCount > 0 then
-    -- Aseprite 하단 상태 표시줄에 표시 (최신 Aseprite UI)
     if app.statusBar then
-        app.statusBar.text = importedCount .. "개 레이어 붙여넣기 완료"
+        app.statusBar.text = importedCount .. "개 항목 붙여넣기 완료"
     else
-        print(importedCount .. "개 레이어 붙여넣기 완료")
+        print(importedCount .. "개 항목 붙여넣기 완료")
     end
 else
-    showMessage("레이어를 생성하지 못했습니다. 전송 데이터(PNG)가 손상되었을 수 있습니다.")
+    showMessage("레이어를 생성하지 못했습니다. 전송 데이터가 손상되었을 수 있습니다.")
 end

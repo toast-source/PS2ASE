@@ -63,51 +63,73 @@ if not spr then
     return app.alert("복사할 활성 문서가 없습니다.")
 end
 
--- 1. 선택된 순수 그리기 레이어(isGroup/isReference 아님) 수집 (Bottom -> Top 순서 유지)
+-- 1. 선택된 레이어 및 그룹(폴더) 수집
+-- Aseprite의 app.range.layers는 선택된 레이어들의 배열입니다.
+-- 기존에는 폴더를 무시했지만, 이제 폴더도 계층 구조 복원을 위해 수집 대상에 포함합니다.
 local selLayers = {}
 local hasSelection = false
 
 if app.range and app.range.layers then
     for _, l in ipairs(app.range.layers) do
         hasSelection = true
-        if not l.isGroup and not l.isReference then
-            -- Aseprite의 app.range.layers는 선택 순서일 수 있으므로, 
-            -- 안전하게 전체 레이어를 순회하며 선택된 것만 담아 고정된 순서(Bottom->Top)를 보장.
-            -- 아래 로직으로 지연 처리.
-        end
     end
 end
 
 if hasSelection then
-    for _, l in ipairs(spr.layers) do
-        local isSelected = false
-        for _, selL in ipairs(app.range.layers) do
-            if l == selL then isSelected = true break end
-        end
-        if isSelected and not l.isGroup and not l.isReference then
-            table.insert(selLayers, l)
+    -- 전체 레이어를 순회하며 선택된 것들을 Bottom->Top 고정 순서로 수집
+    -- (Aseprite의 layers 컬렉션은 폴더 내외를 구분하지 않고 플랫하게 가져올 수 있는 속성이 아니라
+    -- 최상위 레이어부터 시작하는 트리입니다. spr.layers를 재귀 순회하며 선택 여부를 판단해야 합니다.)
+    local function collectSelected(layersCollection)
+        for _, l in ipairs(layersCollection) do
+            local isSelected = false
+            for _, selL in ipairs(app.range.layers) do
+                if l == selL then isSelected = true break end
+            end
+            if isSelected and not l.isReference then
+                table.insert(selLayers, l)
+            end
+            if l.isGroup then
+                collectSelected(l.layers)
+            end
         end
     end
+    collectSelected(spr.layers)
 else
     -- 단일 선택
-    if app.activeLayer and not app.activeLayer.isGroup and not app.activeLayer.isReference then
+    if app.activeLayer and not app.activeLayer.isReference then
         table.insert(selLayers, app.activeLayer)
     else
-        return app.alert("복사할 픽셀 레이어를 선택해주세요 (그룹/레퍼런스 제외).")
+        return app.alert("복사할 레이어/그룹을 선택해주세요 (레퍼런스 제외).")
     end
 end
 
 if #selLayers == 0 then
-    return app.alert("선택된 영역에 유효한 픽셀 레이어가 없습니다.")
+    return app.alert("선택된 영역에 유효한 레이어나 그룹이 없습니다.")
 end
 
 local frame = app.activeFrame or 1
 
--- 2. Job 폴더 준비 (OS 의존성 해결을 위해 powershell 사용 또는 단순 os.execute)
+-- 2. Job 폴더 및 경로 준비 (환경 설정 연동)
 local timestamp = os.date("%Y%m%d_%H%M%S")
 local jobDirName = "bridge_job_" .. timestamp .. "_" .. math.random(1000, 9999)
--- Windows 환경 가정
-local baseTempPath = "C:/Users/SOUTHPAW GAMES/Desktop/AI TS/temp"
+
+-- APPDATA 환경 변수에서 settings.json을 찾음 (Fallback 경로도 지정)
+local baseTempPath = "C:/Users/SOUTHPAW GAMES/Desktop/Ase-PS Bridge Pro/temp"
+local appdata = os.getenv("APPDATA")
+if appdata then
+    local settingsPath = appdata .. "/Ase-PS-Bridge/bridge_settings.json"
+    local f = io.open(settingsPath, "r")
+    if f then
+        local content = f:read("*all")
+        f:close()
+        -- 정규식으로 active_temp_path 값 추출 (JSON 파서 대체용)
+        local extractedPath = content:match('"active_temp_path"%s*:%s*"([^"]+)"')
+        if extractedPath then
+            baseTempPath = extractedPath:gsub("\\\\", "\\"):gsub("\\", "/")
+        end
+    end
+end
+
 local jobPath = baseTempPath .. "/" .. jobDirName
 local layersPath = jobPath .. "/layers"
 
@@ -115,85 +137,141 @@ local layersPath = jobPath .. "/layers"
 os.execute('mkdir "' .. jobPath:gsub("/", "\\") .. '"')
 os.execute('mkdir "' .. layersPath:gsub("/", "\\") .. '"')
 
--- 3. 메타데이터 구성
+-- 3. 재귀적 스캔 및 추출 (Bottom -> Top 순서로 index 부여)
+local elementsList = {}
+local idCounter = 0
+local extractedPixCount = 0
+
+-- 객체의 고유 ID를 기억하기 위한 캐시 (부모 ID 찾기용)
+local idCache = {}
+
+local function traverseItems(items, parentId)
+    local localIndex = 0
+    
+    -- Aseprite는 Bottom -> Top 정방향 순회
+    for i = 1, #items do
+        local item = items[i]
+        
+        -- 현재 item이 사용자가 선택한 selLayers에 포함되는지 확인
+        -- (그룹 전체를 선택했을 때는 자식들도 다 추출해야 하므로 논리가 복잡해집니다.
+        -- 직관적이고 완벽한 재구성을 위해, Aseprite에서는 "선택된 항목"을 루트로 삼아 파고들거나,
+        -- 단순히 selLayers에 포함된 것들의 계층을 구성합니다.)
+        local isTarget = false
+        for _, sel in ipairs(selLayers) do
+            if item == sel then isTarget = true break end
+        end
+        
+        -- 부모가 복사 대상이거나, 나 자신이 복사 대상일 때만 처리 (부분 선택 지원)
+        if isTarget then
+            local currentId = "item_" .. idCounter
+            idCounter = idCounter + 1
+            idCache[item] = currentId
+            
+            if item.isGroup then
+                -- 폴더 처리
+                table.insert(elementsList, {
+                    id = currentId,
+                    type = "group",
+                    name = item.name,
+                    parent_id = parentId,
+                    index = localIndex,
+                    opacity = math.floor(((tonumber(item.opacity) or 255) / 255) * 100),
+                    visible = item.isVisible
+                })
+                localIndex = localIndex + 1
+                
+                -- 자식 순회 (재귀)
+                traverseItems(item.layers, currentId)
+                
+            else
+                -- 일반 픽셀 레이어 처리
+                local cel = item:cel(frame.frameNumber)
+                if cel and cel.image and not cel.image:isEmpty() then
+                    local bounds = cel.bounds
+                    
+                    local croppedImg = Image(bounds.width, bounds.height, spr.colorMode)
+                    croppedImg:clear()
+                    croppedImg:drawImage(cel.image, 0, 0)
+                    
+                    local fileName = "layer_" .. extractedPixCount .. ".png"
+                    local fullPngPath = layersPath .. "/" .. fileName
+                    
+                    croppedImg:saveAs(fullPngPath)
+                    
+                    table.insert(elementsList, {
+                        id = currentId,
+                        type = "layer",
+                        name = item.name,
+                        parent_id = parentId,
+                        index = localIndex,
+                        x = bounds.x,
+                        y = bounds.y,
+                        width = bounds.width,
+                        height = bounds.height,
+                        opacity = math.floor(((tonumber(item.opacity) or 255) / 255) * 100),
+                        visible = item.isVisible,
+                        file = "layers/" .. fileName
+                    })
+                    
+                    localIndex = localIndex + 1
+                    extractedPixCount = extractedPixCount + 1
+                end
+            end
+        elseif item.isGroup then
+            -- 나 자신은 선택되지 않았지만, 내 자식 중에 선택된 것이 있을 수 있으므로 파고듦
+            -- 이 경우 나는 출력되지 않지만 자식들은 내 위쪽 부모(parentId)에 붙게 됨
+            traverseItems(item.layers, parentId)
+        end
+    end
+end
+
+-- 4. 최상단부터 순회 시작
+traverseItems(spr.layers, nil)
+
+if #elementsList == 0 then
+    os.execute('rmdir /S /Q "' .. jobPath:gsub("/", "\\") .. '"')
+    return app.alert("추출 가능한 그룹이나 픽셀 레이어가 없습니다.")
+end
+
+-- 5. 메타데이터 구성 (v1.1 스키마)
 local metadata = {
-    version = "1.0",
+    version = "1.1",
     job_id = jobDirName,
     source_app = "aseprite",
     target_app = "photoshop",
     timestamp = timestamp,
     document_name = spr.filename:match("[^\\]+$") or "Untitled",
     canvas_size = { w = spr.width, h = spr.height },
-    layers = {},
-    layer_count = 0
+    element_count = #elementsList,
+    elements = elementsList,
+    -- 하위 호환성을 위한 임시 레이어 배열
+    layer_count = extractedPixCount,
+    layers = {}
 }
 
-local extractedCount = 0
-
--- 4. 레이어 추출 (수동 크롭 로직)
-for i = 1, #selLayers do
-    local layer = selLayers[i]
-    local cel = layer:cel(frame.frameNumber)
-    
-    -- 빈 레이어(cel이 없거나 픽셀이 없는 경우)는 스킵하여 Bounding Box 왜곡 방지
-    if cel and cel.image and not cel.image:isEmpty() then
-        local bounds = cel.bounds
-        
-        -- 핵심: cel.image는 이미 캔버스 상의 자기 위치(bounds.x, bounds.y)와 무관하게 
-        -- 내부적으로 0,0을 시작점으로 하는 크롭된 픽셀 덩어리임.
-        -- 따라서 bounds 크기와 똑같은 새 이미지를 만들고, 0,0 위치에 그대로 옮겨 그리면 완벽한 1:1 크롭이 됨.
-        local croppedImg = Image(bounds.width, bounds.height, spr.colorMode)
-        croppedImg:clear()
-        croppedImg:drawImage(cel.image, 0, 0)
-        
-        local fileName = "layer_" .. extractedCount .. ".png"
-        local fullPngPath = layersPath .. "/" .. fileName
-        
-        croppedImg:saveAs(fullPngPath)
-        
-        table.insert(metadata.layers, {
-            index = extractedCount,
-            name = layer.name,
-            x = bounds.x,
-            y = bounds.y,
-            width = bounds.width,
-            height = bounds.height,
-            -- Aseprite 불투명도(0~255)를 Bridge 표준(0~100 백분율)으로 정규화
-            opacity = math.floor((layer.opacity / 255) * 100),
-            visible = layer.isVisible,
-            blendMode = "BlendMode.NORMAL",
-            file = "layers/" .. fileName
-        })
-        
-        extractedCount = extractedCount + 1
+for i = 1, #elementsList do
+    if elementsList[i].type == "layer" then
+        table.insert(metadata.layers, elementsList[i])
     end
 end
 
-if extractedCount == 0 then
-    -- 추출된 레이어가 없으면 빈 폴더 삭제 후 종료
-    os.execute('rmdir /S /Q "' .. jobPath:gsub("/", "\\") .. '"')
-    return app.alert("선택된 레이어에 픽셀 데이터가 없어 복사하지 않았습니다.")
-end
-
-metadata.layer_count = extractedCount
-
--- 5. metadata.json 저장
 local metaFile = io.open(jobPath .. "/metadata.json", "w")
 if metaFile then
     metaFile:write(encodeJson(metadata))
     metaFile:close()
 end
 
--- 6. Python Daemon용 trigger_copy.json 생성
+-- 6. Python Daemon용 트리거 파일 생성
 local payload = {
     signature = "ase_ps_bridge_payload",
-    version = "1.0",
+    version = "1.1",
     job_id = jobDirName,
     source_app = "aseprite",
     target_app = "photoshop",
     job_path = jobPath,
     summary = {
-        layer_count = extractedCount,
+        layer_count = extractedPixCount,
+        element_count = #elementsList,
         document_name = metadata.document_name
     },
     timestamp = timestamp
@@ -205,9 +283,8 @@ if triggerFile then
     triggerFile:close()
 end
 
--- UX 피드백 (app.statusBar 사용, 팝업으로 작업 흐름 끊지 않음)
 if app.statusBar then
-    app.statusBar.text = extractedCount .. "개 레이어가 브릿지 클립보드에 복사되었습니다."
+    app.statusBar.text = #elementsList .. "개 항목(그룹 포함)이 복사되었습니다."
 else
-    print(extractedCount .. "개 레이어 복사 완료")
+    print(#elementsList .. "개 항목 복사 완료")
 end
