@@ -540,13 +540,25 @@ class BridgeApp(QMainWindow):
     def __init__(self):
         super().__init__()
         
+        # 윈도우 작업표시줄 아이콘 강제 적용 (Python 기본 아이콘 덮어쓰기)
+        import ctypes
+        myappid = 'southpawgames.bridgepro.1.1'
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except:
+            pass
+
         self.setMinimumSize(380, 580)
         self.resize(380, 580)
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.Window)
         
-        # 앱 아이콘 설정
+        # 앱 아이콘 설정 (빌드된 .exe 파일 내부에서 아이콘 추출)
         from PySide6.QtGui import QIcon
-        icon_path = os.path.join(BASE_DIR, "bridge_icon.ico")
+        if getattr(sys, 'frozen', False):
+            icon_dir = sys._MEIPASS # PyInstaller 임시 압축해제 폴더
+        else:
+            icon_dir = BASE_DIR
+        icon_path = os.path.join(icon_dir, "bridge_icon.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
