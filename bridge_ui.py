@@ -138,6 +138,59 @@ LANG = {
                        "• <b>Absolute</b>: Keeps the exact original X/Y coordinates. (Use only when canvas sizes are identical)<br><br>"
                        "<b>🔥 Overwriting Tip</b><br>"
                        "When pasting into Aseprite without folders, the tool will <b>intelligently overwrite</b> existing layers instead of creating new ones!"
+    },
+    "ja": {
+        "title": "Ase-PS Bridge Pro",
+        "clip_empty": "📋 クリップボード：空",
+        "clip_ready": "📋 {src} -> {dst} ({count}個のレイヤー)",
+        "align_label": "配置の基準:",
+        "align_center": "Center (中央揃え)",
+        "align_abs": "Absolute (絶対座標)",
+        "btn_ps_copy": "1. Photoshopからコピー",
+        "btn_ase_paste": "2. Asepriteへペースト (F4)",
+        "btn_ase_copy": "3. Asepriteからコピー (F5)",
+        "btn_ps_paste": "4. Photoshopへペースト",
+        "btn_settings": "⚙️ 設定",
+        "btn_clean": "🗑️ 一時ファイル整理",
+        "msg_started": "🚀 Bridge Pro 双方向UIが起動しました。",
+        "msg_detecting": "パスの自動検出中...",
+        "msg_detect_fail": "❌ 必須の実行ファイルパスが見つかりませんでした。",
+        "msg_detect_success": "✅ プログラムのインストールパス自動検出完了！",
+        "msg_ase_setup_success": "✅ Asepriteスクリプト/ショートカット(F4/F5)のマッピング完了！",
+        "msg_ase_setup_fail": "⚠️ Asepriteショートカットのマッピング失敗 (手動設定が必要)。",
+        "msg_settings_saved": "✅ 設定が保存されました。",
+        "msg_clean_success": "✅ 一時フォルダ(Temp)が整理されました！確保された容量: {size}MB",
+        "msg_clean_fail": "❌ 一時フォルダの整理失敗: {error}",
+        "msg_ps_copying": "PS: レイヤーを抽出中...",
+        "msg_ps_pasting": "PS: レイヤーを組み立て中...",
+        "msg_ase_copying": "Aseprite: レイヤーを抽出中...",
+        "msg_ase_pasting": "Aseprite: ペースト中...",
+        "msg_ps_success": "✅ Photoshopの作業が正常に完了しました！",
+        "msg_clip_update": "クリップボード更新: {count}個のレイヤーが準備完了。",
+        "err_no_ase_clip": "❌ [Error] クリップボードにAsepriteのデータがありません。",
+        "set_title": "⚙️ ブリッジ設定",
+        "set_ps_path": "Photoshopのパス:",
+        "set_ase_path": "Asepriteのパス:",
+        "set_find": "参照",
+        "set_align": "デフォルトの配置モード:",
+        "set_lang": "言語 (Language):",
+        "set_hotkey": "Asepriteのショートカット状態:",
+        "set_force_reinstall": "Asepriteスクリプト/ショートカットの強制再インストール",
+        "btn_tutorial": "❓ チュートリアル",
+        "tut_title": "📖 プログラムの使い方",
+        "tut_content": "<b>[ 💡 Ase-PS Bridge Pro ガイド ]</b><br><br>"
+                       "<b>1. 順方向 (Photoshop ➔ Aseprite)</b><br>"
+                       "① Photoshopで転送するレイヤー(またはフォルダ)を複数選択します。<br>"
+                       "② アプリの <span style='color:#3b82f6;'>[1. Photoshopからコピー]</span> ボタンを押します。<br>"
+                       "③ Asepriteのキャンバスに移動し、アプリの <span style='color:#10b981;'>[2. Asepriteへペースト]</span> ボタンを押すか、キーボードの <b>F4</b> を押すと完璧にペーストされます。<br><br>"
+                       "<b>2. 逆方向 (Aseprite ➔ Photoshop)</b><br>"
+                       "① Asepriteでレイヤーを選択した後、アプリの <span style='color:#f59e0b;'>[3. Asepriteからコピー]</span> ボタンを押すか、キーボードの <b>F5</b> を押します。<br>"
+                       "② Photoshopのドキュメントに移動し、アプリの <span style='color:#8b5cf6;'>[4. Photoshopへペースト]</span> ボタンを押します。<br><br>"
+                       "<b>⭐ 配置モードの説明 (Alignment)</b><br>"
+                       "• <b>Center (中央揃え)</b>: キャンバスのサイズが異なっても、キャラクター全体を画面の中央に合わせてペーストします。(推奨)<br>"
+                       "• <b>Absolute (絶対座標)</b>: 中央補正を行わず、元の座標のままペーストします。(両方のキャンバスサイズが完全に同じ時だけ使用してください)<br><br>"
+                       "<b>🔥 上書きのコツ (Overwriting)</b><br>"
+                       "Asepriteで通常のレイヤーのみをコピーしてきた時、キャンバスにある既存のレイヤーを選択してペーストすると、新しいレイヤーを作らずに<b>元の名前のままピクセルだけを上書き</b>してくれます！"
     }
 }
 
@@ -457,16 +510,22 @@ class SettingsDialog(QDialog):
         lang_hlayout = QHBoxLayout()
         self.rb_ko = QRadioButton("한국어")
         self.rb_en = QRadioButton("English")
+        self.rb_ja = QRadioButton("日本語")
         self.lang_combo.addButton(self.rb_ko, 1)
         self.lang_combo.addButton(self.rb_en, 2)
+        self.lang_combo.addButton(self.rb_ja, 3)
         
-        if self.current_settings.get("language", "ko") == "en":
+        current_lang = self.current_settings.get("language", "ko")
+        if current_lang == "en":
             self.rb_en.setChecked(True)
+        elif current_lang == "ja":
+            self.rb_ja.setChecked(True)
         else:
             self.rb_ko.setChecked(True)
             
         lang_hlayout.addWidget(self.rb_ko)
         lang_hlayout.addWidget(self.rb_en)
+        lang_hlayout.addWidget(self.rb_ja)
         form_layout.addRow(self.lang["set_lang"], lang_hlayout)
         
         layout.addLayout(form_layout)
@@ -631,21 +690,21 @@ class BridgeApp(QMainWindow):
         btn_layout = QVBoxLayout()
         btn_layout.setSpacing(5)
         
-        btn_clean = QPushButton(self.t["btn_clean"])
-        btn_clean.setStyleSheet("background-color: #ef4444; color: white; border-radius: 4px; padding: 5px;")
-        btn_clean.clicked.connect(self.clean_temp_folder)
+        self.btn_clean = QPushButton(self.t["btn_clean"])
+        self.btn_clean.setStyleSheet("background-color: #ef4444; color: white; border-radius: 4px; padding: 5px;")
+        self.btn_clean.clicked.connect(self.clean_temp_folder)
         
         settings_tut_layout = QHBoxLayout()
-        btn_tutorial = QPushButton(self.t["btn_tutorial"])
-        btn_tutorial.clicked.connect(self.show_tutorial)
+        self.btn_tutorial = QPushButton(self.t["btn_tutorial"])
+        self.btn_tutorial.clicked.connect(self.show_tutorial)
         
-        btn_settings = QPushButton(self.t["btn_settings"])
-        btn_settings.clicked.connect(self.open_settings)
+        self.btn_settings = QPushButton(self.t["btn_settings"])
+        self.btn_settings.clicked.connect(self.open_settings)
         
-        settings_tut_layout.addWidget(btn_tutorial)
-        settings_tut_layout.addWidget(btn_settings)
+        settings_tut_layout.addWidget(self.btn_tutorial)
+        settings_tut_layout.addWidget(self.btn_settings)
         
-        btn_layout.addWidget(btn_clean)
+        btn_layout.addWidget(self.btn_clean)
         btn_layout.addLayout(settings_tut_layout)
         
         top_layout.addWidget(self.status_label, stretch=1)
@@ -723,6 +782,12 @@ class BridgeApp(QMainWindow):
         self.btn_ase_paste.setText(self.t["btn_ase_paste"])
         self.btn_ase_copy.setText(self.t["btn_ase_copy"])
         self.btn_ps_paste.setText(self.t["btn_ps_paste"])
+        
+        # 추가된 버튼들의 텍스트 갱신
+        self.btn_clean.setText(self.t["btn_clean"])
+        self.btn_tutorial.setText(self.t["btn_tutorial"])
+        self.btn_settings.setText(self.t["btn_settings"])
+        
         if not self.last_job_id:
             self.update_status(self.t["clip_empty"], "#f3f4f6", "#374151")
 
