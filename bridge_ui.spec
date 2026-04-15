@@ -5,7 +5,7 @@ a = Analysis(
     ['C:\\Users\\SOUTHPAW GAMES\\Desktop\\AI TS\\bridge_ui.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('bridge_icon.ico', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
