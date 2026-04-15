@@ -6,13 +6,145 @@ import time
 import shutil
 import winreg
 import xml.etree.ElementTree as ET
+import io
+from PIL import Image
 from PySide6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout, 
                                QWidget, QTextEdit, QLabel, QRadioButton, QButtonGroup, 
                                QHBoxLayout, QMessageBox, QFileDialog, QDialog, QLineEdit, QFormLayout, QDialogButtonBox)
 from PySide6.QtCore import QTimer, QThread, Signal, Qt
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtGui import QFont, QColor, QPixmap
 import win32com.client
 import pythoncom
+
+# ==========================================
+# Preview Generator Worker (UI 멈춤 방지용 비동기 합성기)
+# ==========================================
+class PreviewGeneratorWorker(QThread):
+    preview_ready = Signal(bytes)
+    preview_failed = Signal(str)
+
+    def __init__(self, job_path):
+        super().__init__()
+        self.job_path = job_path
+
+    def run(self):
+        try:
+            # 1. 안전 장치: 작업이 완전히 끝났는지(status_done) 다시 한번 확인
+            # 클립보드 감지는 빠르지만 파일 시스템 동기화 지연(Race condition) 방지
+            done_file = os.path.join(self.job_path, "status_done.json")
+            retry_count = 0
+            while not os.path.exists(done_file) and retry_count < 10:
+                time.sleep(0.1)
+                retry_count += 1
+                
+            if not os.path.exists(done_file):
+                self.preview_failed.emit("작업 완료(status_done) 파일을 찾을 수 없습니다.")
+                return
+
+            meta_path = os.path.join(self.job_path, "metadata.json")
+            if not os.path.exists(meta_path):
+                self.preview_failed.emit("metadata.json not found")
+                return
+
+            with open(meta_path, "r", encoding="utf-8") as f:
+                metadata = json.load(f)
+
+            elements = metadata.get("elements") or metadata.get("layers", [])
+            if not elements:
+                self.preview_failed.emit("표시할 레이어가 없습니다.")
+                return
+
+            # 2. 계층 구조 평탄화 (Tree Flattening) 및 렌더 순서(Z-order) 결정
+            # 단순히 index만 보면 다른 부모를 가진 형제들끼리 순서가 꼬임.
+            # 트리 순회를 통해 Bottom -> Top 렌더링 리스트를 추출해야 함.
+            tree_map = {}
+            for el in elements:
+                p_id = el.get("parent_id") or "root"
+                if p_id not in tree_map:
+                    tree_map[p_id] = []
+                tree_map[p_id].append(el)
+
+            # 형제들끼리 index 오름차순(Bottom->Top) 정렬
+            for p_id in tree_map:
+                tree_map[p_id].sort(key=lambda x: x.get("index", 0))
+
+            render_list = []
+            
+            # 깊이 우선 탐색(DFS) 방식으로 Bottom 요소부터 차례대로 평탄화 배열에 담음
+            def flatten_tree(parent_id):
+                children = tree_map.get(parent_id, [])
+                for child in children:
+                    if child.get("type") == "group":
+                        flatten_tree(child.get("id")) # 폴더면 파고들어 자식들 먼저 수집
+                    elif child.get("type", "layer") == "layer" and child.get("visible", True) is not False:
+                        render_list.append(child) # 일반 픽셀 레이어면 렌더링 목록에 추가
+                        
+            flatten_tree("root")
+
+            if not render_list:
+                self.preview_failed.emit("표시할 픽셀(visible) 레이어가 없습니다.")
+                return
+
+            # 3. 전체 덩어리(Bounding Box) 계산
+            min_x = min(l.get("x", 0) for l in render_list)
+            min_y = min(l.get("y", 0) for l in render_list)
+            max_x = max(l.get("x", 0) + l.get("width", 0) for l in render_list)
+            max_y = max(l.get("y", 0) + l.get("height", 0) for l in render_list)
+
+            canvas_w = max_x - min_x
+            canvas_h = max_y - min_y
+
+            if canvas_w <= 0 or canvas_h <= 0:
+                self.preview_failed.emit("유효하지 않은 캔버스 크기입니다.")
+                return
+
+            # 4. 투명 캔버스 생성
+            base_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+
+            # 5. 각 레이어를 캔버스에 얹기 (Alpha Composite)
+            for l in render_list:
+                png_path = os.path.join(self.job_path, l.get("file", ""))
+                if not os.path.exists(png_path):
+                    continue
+
+                try:
+                    with Image.open(png_path) as layer_img:
+                        layer_img = layer_img.convert("RGBA")
+                        
+                        opacity_pct = l.get("opacity", 100)
+                        if opacity_pct < 100:
+                            alpha = layer_img.split()[3]
+                            alpha = alpha.point(lambda p: int(p * (opacity_pct / 100.0)))
+                            layer_img.putalpha(alpha)
+                        
+                        target_x = l.get("x", 0) - min_x
+                        target_y = l.get("y", 0) - min_y
+                        
+                        base_canvas.alpha_composite(layer_img, dest=(target_x, target_y))
+                except Exception:
+                    pass
+
+            # 6. 썸네일 축소 (픽셀아트 특성 고려)
+            # 원본 이미지가 160x160 보다 작으면 픽셀이 뭉개지지 않도록 NEAREST(Nearest Neighbor)를 사용하여 그대로 키움.
+            # 원본이 너무 크면 LANCZOS로 부드럽게 축소.
+            target_size = (160, 160)
+            if canvas_w < 160 and canvas_h < 160:
+                # 작은 도트 이미지는 선명하게 확대 (Aspect Ratio 유지)
+                ratio = min(160 / canvas_w, 160 / canvas_h)
+                new_w, new_h = int(canvas_w * ratio), int(canvas_h * ratio)
+                base_canvas = base_canvas.resize((new_w, new_h), Image.Resampling.NEAREST)
+            else:
+                # 큰 이미지는 부드럽게 축소
+                base_canvas.thumbnail(target_size, Image.Resampling.LANCZOS)
+
+            # 7. 메모리 바이너리로 변환하여 Signal 쏘기
+            buf = io.BytesIO()
+            base_canvas.save(buf, format="PNG")
+            
+            self.preview_ready.emit(buf.getvalue())
+            
+        except Exception as e:
+            self.preview_failed.emit(f"합성 에러: {str(e)}")
 
 # ==========================================
 # 실행 환경에 따른 동적 경로 설정 (빌드 배포용)
@@ -83,8 +215,15 @@ LANG = {
                        "<b>⭐ 정렬 모드 설명 (Alignment)</b><br>"
                        "• <b>Center (중앙 정렬)</b>: 캔버스 크기가 달라도 캐릭터 덩어리를 화면 정중앙에 맞춰서 붙여넣습니다. (기본/권장)<br>"
                        "• <b>Absolute (절대 좌표)</b>: 중앙 보정 없이 원래 있던 좌표 그대로 꽂아넣습니다. (양쪽 캔버스 사이즈가 똑같을 때만 쓰세요)<br><br>"
-                       "<b>🔥 꿀팁 (Overwriting)</b><br>"
-                       "Aseprite에서 일반 레이어만 복사해왔을 때, 캔버스에 있는 기존 레이어를 선택하고 붙여넣으면 새 레이어를 만들지 않고 <b>원래 이름 그대로 픽셀만 덮어씌워줍니다!</b>"
+                       "<b>📌 Recent Files 정리 팁 (중요)</b><br>"
+                       "Ase-PS Bridge Pro는 픽셀 정확성과 레이어 보존을 위해 임시 이미지를 생성하여 Aseprite에 불러옵니다.<br>"
+                       "이 과정에서 Aseprite의 '최근 파일(Recent Files)' 목록에 임시 파일들이 추가될 수 있습니다. 이는 정상적인 동작이며, 원본 데이터에는 전혀 영향을 주지 않습니다.<br><br>"
+                       "<b>✔ 추천 작업 방식</b><br>"
+                       "1. 자주 사용하는 작업 파일을 <b>'즐겨찾기(Favorites)'</b>에 추가하세요.<br>"
+                       "2. Recent 목록 대신 Favorites를 기준으로 작업하세요.<br>"
+                       "3. 필요 시 Recent 목록은 주기적으로 정리해 주세요.<br>"
+                       "👉 이 방법을 사용하면 Recent 목록 문제 없이 쾌적하게 작업할 수 있습니다.",
+        "tut_dont_show": "다음 실행부터 이 창을 띄우지 않음"
     },
     "en": {
         "title": "Ase-PS Bridge Pro",
@@ -136,8 +275,10 @@ LANG = {
                        "<b>⭐ Alignment Mode</b><br>"
                        "• <b>Center</b>: Auto-centers the bounding box of copied layers to the target canvas. (Recommended)<br>"
                        "• <b>Absolute</b>: Keeps the exact original X/Y coordinates. (Use only when canvas sizes are identical)<br><br>"
-                       "<b>🔥 Overwriting Tip</b><br>"
-                       "When pasting into Aseprite without folders, the tool will <b>intelligently overwrite</b> existing layers instead of creating new ones!"
+                       "<b>⚠️ Warnings</b><br>"
+                       "• <b>Aseprite 'Recent files' list may get messy</b><br>"
+                       "  To ensure perfect pixel transfer, this tool repeatedly opens and closes temporary PNG files in the background, which will leave traces in Aseprite's recent files list.",
+        "tut_dont_show": "Do not show this window on startup"
     },
     "ja": {
         "title": "Ase-PS Bridge Pro",
@@ -189,8 +330,13 @@ LANG = {
                        "<b>⭐ 配置モードの説明 (Alignment)</b><br>"
                        "• <b>Center (中央揃え)</b>: キャンバスのサイズが異なっても、キャラクター全体を画面の中央に合わせてペーストします。(推奨)<br>"
                        "• <b>Absolute (絶対座標)</b>: 中央補正を行わず、元の座標のままペーストします。(両方のキャンバスサイズが完全に同じ時だけ使用してください)<br><br>"
-                       "<b>🔥 上書きのコツ (Overwriting)</b><br>"
-                       "Asepriteで通常のレイヤーのみをコピーしてきた時、キャンバスにある既存のレイヤーを選択してペーストすると、新しいレイヤーを作らずに<b>元の名前のままピクセルだけを上書き</b>してくれます！"
+                       "<b>📌 Recent Files 整理のヒント (重要)</b><br>"
+                       "完璧なピクセル転送のため、バックグラウンドで一時的なPNGファイルを開閉します。そのため、Asepriteの「最近開いたファイル(Recent files)」リストに一時ファイルが残る場合があります。これは正常な動作であり、データに影響はありません。<br><br>"
+                       "<b>✔ お勧めの作業方法</b><br>"
+                       "1. よく使う作業ファイルは<b>「お気に入り(Favorites)」</b>に追加してください。<br>"
+                       "2. Recentリストの代わりにお気に入りを基準に作業してください。<br>"
+                       "3. 必要に応じてRecentリストを定期的に整理してください。",
+        "tut_dont_show": "次回からこのウィンドウを表示しない"
     }
 }
 
@@ -564,22 +710,31 @@ class SettingsDialog(QDialog):
             self.hotkey_status.setText(f"❌ Failed: {msg}")
 
     def get_settings(self):
+        lang = "ko"
+        if self.rb_en.isChecked():
+            lang = "en"
+        elif self.rb_ja.isChecked():
+            lang = "ja"
+            
         return {
             "photoshop_exe": self.ps_path_input.text(),
             "aseprite_exe": self.ase_path_input.text(),
             "default_alignment": "center" if self.rb_center.isChecked() else "absolute",
-            "language": "en" if self.rb_en.isChecked() else "ko",
+            "language": lang,
             "hotkey_status": self.hotkey_status.text()
         }
 
 # ==========================================
 # Tutorial Dialog
 # ==========================================
+from PySide6.QtWidgets import QCheckBox
+
 class TutorialDialog(QDialog):
     def __init__(self, lang_dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle(lang_dict["tut_title"])
         self.setMinimumSize(400, 350)
+        self.parent_app = parent
         
         layout = QVBoxLayout(self)
         
@@ -588,9 +743,19 @@ class TutorialDialog(QDialog):
         content_label.setStyleSheet("font-size: 13px; line-height: 1.5;")
         layout.addWidget(content_label)
         
+        self.cb_dont_show = QCheckBox(lang_dict["tut_dont_show"])
+        layout.addWidget(self.cb_dont_show)
+        
         btn_close = QPushButton("OK")
         btn_close.clicked.connect(self.accept)
         layout.addWidget(btn_close, alignment=Qt.AlignCenter)
+
+    def accept(self):
+        if self.parent_app and hasattr(self.parent_app, 'settings'):
+            if self.cb_dont_show.isChecked():
+                self.parent_app.settings["show_tutorial"] = False
+                save_settings(self.parent_app.settings)
+        super().accept()
 
 # ==========================================
 # Main UI Window
@@ -643,6 +808,10 @@ class BridgeApp(QMainWindow):
         self.init_ui()
         self.init_timers()
         self.log_message(self.t["msg_started"])
+        
+        # 튜토리얼 자동 표시 로직
+        if self.settings.get("show_tutorial", True):
+            QTimer.singleShot(500, self.show_tutorial)
 
     def init_environment(self):
         updated = False
@@ -710,6 +879,20 @@ class BridgeApp(QMainWindow):
         top_layout.addWidget(self.status_label, stretch=1)
         top_layout.addLayout(btn_layout)
         layout.addLayout(top_layout)
+
+        # === 썸네일 Preview 영역 ===
+        self.preview_label = QLabel("No Preview")
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setFixedSize(350, 160)
+        self.preview_label.setStyleSheet("""
+            background-color: #e5e7eb;
+            background-image: repeating-linear-gradient(45deg, #d1d5db 25%, transparent 25%, transparent 75%, #d1d5db 75%, #d1d5db), repeating-linear-gradient(45deg, #d1d5db 25%, #e5e7eb 25%, #e5e7eb 75%, #d1d5db 75%, #d1d5db);
+            background-position: 0 0, 10px 10px;
+            background-size: 20px 20px;
+            border-radius: 5px;
+            border: 1px solid #d1d5db;
+        """)
+        layout.addWidget(self.preview_label, alignment=Qt.AlignCenter)
 
         # 정렬 모드
         align_layout = QHBoxLayout()
@@ -835,6 +1018,7 @@ class BridgeApp(QMainWindow):
             self.update_status(self.t["clip_empty"], "#f3f4f6", "#374151")
             self.btn_ase_paste.setEnabled(False)
             self.btn_ps_paste.setEnabled(False)
+            self.clear_preview()
             
             # 실제 윈도우 클립보드도 완전히 비워서 QTimer가 다시 읽어오는 것을 방지
             try:
@@ -895,6 +1079,23 @@ class BridgeApp(QMainWindow):
         except Exception:
             pass
 
+    # 🌟 [신규 추가] Preview 처리 메서드
+    def set_preview_image(self, img_bytes):
+        pixmap = QPixmap()
+        pixmap.loadFromData(img_bytes, "PNG")
+        self.preview_label.setPixmap(pixmap)
+
+    def clear_preview(self):
+        self.preview_label.clear()
+        self.preview_label.setText("No Preview")
+
+    def start_preview_generation(self, job_path):
+        self.preview_label.setText("Generating Preview...")
+        self.preview_worker = PreviewGeneratorWorker(job_path)
+        self.preview_worker.preview_ready.connect(self.set_preview_image)
+        self.preview_worker.preview_failed.connect(lambda msg: self.preview_label.setText(f"Preview Failed"))
+        self.preview_worker.start()
+
     def check_clipboard(self):
         import win32clipboard
         try:
@@ -910,11 +1111,16 @@ class BridgeApp(QMainWindow):
                     job_id = payload.get("job_id")
                     source = payload.get("source_app", "unknown")
                     count = payload.get("summary", {}).get("layer_count", 0)
-                    
+
                     if job_id != self.last_job_id:
                         self.last_job_id = job_id
                         self.clipboard_source = source
-                        
+
+                        # 🌟 [신규 추가] 새로운 작업 감지 시 백그라운드 프리뷰 렌더링 시작!
+                        job_path = payload.get("job_path")
+                        if job_path and os.path.exists(job_path):
+                            self.start_preview_generation(job_path)
+
                         if source == "photoshop":
                             msg = self.t["clip_ready"].format(src="PS", dst="Ase", count=count)
                             self.update_status(msg, "#dbeafe", "#1e40af")
@@ -925,19 +1131,19 @@ class BridgeApp(QMainWindow):
                             self.update_status(msg, "#fef3c7", "#b45309")
                             self.btn_ps_paste.setEnabled(True)
                             self.btn_ase_paste.setEnabled(False)
-                            
+
                         self.log_message(self.t["msg_clip_update"].format(count=count))
                     return
         except Exception:
             pass
-            
+
         if self.last_job_id is not None:
             self.last_job_id = None
             self.clipboard_source = None
             self.update_status(self.t["clip_empty"], "#f3f4f6", "#374151")
             self.btn_ase_paste.setEnabled(False)
             self.btn_ps_paste.setEnabled(False)
-
+            self.clear_preview() # 🌟 [신규 추가] 클립보드가 비워지면 프리뷰도 초기화
     def update_status(self, text, bg_color, text_color):
         self.status_label.setText(text)
         self.status_label.setStyleSheet(f"padding: 10px; background-color: {bg_color}; color: {text_color}; border-radius: 5px; font-weight: bold;")
