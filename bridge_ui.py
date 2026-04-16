@@ -17,22 +17,23 @@ import win32com.client
 import pythoncom
 
 # ==========================================
-# Job Transform Worker (좌우/상하 반전 비동기 처리 - 원본 보존형)
+# Job Transform Worker (비파괴 변환: Flip/Rotate 비동기 처리)
 # ==========================================
 class JobTransformWorker(QThread):
-    transform_done = Signal(bool, bool) # flip_h, flip_v 상태 전달
+    transform_done = Signal()
     error = Signal(str)
     log = Signal(str)
 
-    def __init__(self, job_path, flip_h, flip_v):
+    def __init__(self, job_path, flip_h, flip_v, angle):
         super().__init__()
         self.job_path = job_path
         self.flip_h = flip_h
         self.flip_v = flip_v
+        self.angle = angle # 0, 90, 180, 270 (Clockwise)
 
     def run(self):
         try:
-            self.log.emit(f"Applying transformation (H:{self.flip_h}, V:{self.flip_v})...")
+            self.log.emit(f"Applying transformation (Angle:{self.angle}, H:{self.flip_h}, V:{self.flip_v})...")
             backup_path = os.path.join(self.job_path, "_backup")
             meta_path = os.path.join(self.job_path, "metadata.json")
             layers_path = os.path.join(self.job_path, "layers")
@@ -40,7 +41,7 @@ class JobTransformWorker(QThread):
             backup_meta = os.path.join(backup_path, "metadata.json")
             backup_layers = os.path.join(backup_path, "layers")
 
-            # 1. 최초 1회 원본 백업 생성
+            # 1. 최초 1회 원본 백업 생성 (비파괴 유지)
             if not os.path.exists(backup_path):
                 os.makedirs(backup_path)
                 if os.path.exists(meta_path):
@@ -49,7 +50,7 @@ class JobTransformWorker(QThread):
                     shutil.copytree(layers_path, backup_layers)
                 self.log.emit("✅ 원본 데이터를 안전하게 백업했습니다.")
 
-            # 2. 항상 원본(Backup)에서 시작 (오차 누적 및 품질 저하 방지)
+            # 2. 항상 원본(Backup)에서 시작 (누적 오차 방지)
             if os.path.exists(backup_meta):
                 shutil.copy2(backup_meta, meta_path)
             if os.path.exists(backup_layers):
@@ -57,9 +58,8 @@ class JobTransformWorker(QThread):
                     shutil.rmtree(layers_path)
                 shutil.copytree(backup_layers, layers_path)
 
-            # 3. 만약 둘 다 False면 원본 복구만 하고 종료
-            if not self.flip_h and not self.flip_v:
-                self.transform_done.emit(self.flip_h, self.flip_v)
+            if not self.flip_h and not self.flip_v and self.angle == 0:
+                self.transform_done.emit()
                 return
 
             with open(meta_path, "r", encoding="utf-8") as f:
@@ -69,45 +69,68 @@ class JobTransformWorker(QThread):
             pixel_layers = [el for el in elements if el.get("type", "layer") == "layer"]
             
             if not pixel_layers:
-                self.transform_done.emit(self.flip_h, self.flip_v)
+                self.transform_done.emit()
                 return
 
+            # 원본 기준 바운딩 박스 계산
             min_x = min((l.get("x", 0) for l in pixel_layers))
             min_y = min((l.get("y", 0) for l in pixel_layers))
             max_x = max((l.get("x", 0) + l.get("width", 0) for l in pixel_layers))
             max_y = max((l.get("y", 0) + l.get("height", 0) for l in pixel_layers))
+            bbox_w, bbox_h = max_x - min_x, max_y - min_y
+
+            # 회전 후 가상의 바운딩 박스 크기
+            new_bbox_w = bbox_h if self.angle in [90, 270] else bbox_w
+            new_bbox_h = bbox_w if self.angle in [90, 270] else bbox_h
 
             from PIL import Image
 
-            # 4. 필터링된 레이어들에 대해 반전 적용
+            # 3. 레이어별 좌표 및 이미지 변환
             for el in elements:
                 if el.get("type", "layer") == "layer":
-                    # 좌표 계산
-                    if self.flip_h:
-                        old_x = el.get("x", 0)
-                        el["x"] = min_x + (max_x - (old_x + el.get("width", 0)))
-                    if self.flip_v:
-                        old_y = el.get("y", 0)
-                        el["y"] = min_y + (max_y - (old_y + el.get("height", 0)))
+                    orig_x, orig_y = el.get("x", 0), el.get("y", 0)
+                    orig_w, orig_h = el.get("width", 0), el.get("height", 0)
 
-                    # 이미지 반전
+                    # [3-1] 좌표 회전 (90도 단위 시계방향)
+                    if self.angle == 90:
+                        el["x"] = min_x + (bbox_h - (orig_y - min_y + orig_h))
+                        el["y"] = min_y + (orig_x - min_x)
+                        el["width"], el["height"] = orig_h, orig_w
+                    elif self.angle == 180:
+                        el["x"] = min_x + (bbox_w - (orig_x - min_x + orig_w))
+                        el["y"] = min_y + (bbox_h - (orig_y - min_y + orig_h))
+                    elif self.angle == 270:
+                        el["x"] = min_x + (orig_y - min_y)
+                        el["y"] = min_y + (bbox_w - (orig_x - min_x + orig_w))
+                        el["width"], el["height"] = orig_h, orig_w
+
+                    # [3-2] 좌표 반전 (회전된 좌표 기준)
+                    if self.flip_h:
+                        el["x"] = min_x + (new_bbox_w - (el["x"] - min_x + el["width"]))
+                    if self.flip_v:
+                        el["y"] = min_y + (new_bbox_h - (el["y"] - min_y + el["height"]))
+
+                    # [3-3] 실제 이미지 변환
                     png_path = os.path.join(self.job_path, el.get("file", ""))
                     if os.path.exists(png_path):
                         with Image.open(png_path) as img:
-                            flipped = img
-                            if self.flip_h:
-                                flipped = flipped.transpose(Image.FLIP_LEFT_RIGHT)
-                            if self.flip_v:
-                                flipped = flipped.transpose(Image.FLIP_TOP_BOTTOM)
-                            flipped.save(png_path)
+                            # 회전
+                            if self.angle == 90: img = img.transpose(Image.ROTATE_270)
+                            elif self.angle == 180: img = img.transpose(Image.ROTATE_180)
+                            elif self.angle == 270: img = img.transpose(Image.ROTATE_90)
+                            # 반전
+                            if self.flip_h: img = img.transpose(Image.FLIP_LEFT_RIGHT)
+                            if self.flip_v: img = img.transpose(Image.FLIP_TOP_BOTTOM)
+                            img.save(png_path)
 
-            # 5. 수정된 메타데이터 저장
+            # 4. 수정된 메타데이터 저장
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=4, ensure_ascii=False)
 
-            self.transform_done.emit(self.flip_h, self.flip_v)
+            self.transform_done.emit()
         except Exception as e:
-            self.error.emit(f"변환 에러: {str(e)}")
+            self.error.emit(f"Transform error: {str(e)}")
+
         except Exception as e:
             self.error.emit(f"변환 에러: {str(e)}")
 
@@ -288,6 +311,9 @@ LANG = {
         "msg_ase_pasting": "Aseprite: 붙여넣기 중...",
         "msg_ps_success": "✅ 포토샵 작업이 성공적으로 완료되었습니다!",
         "msg_clip_update": "클립보드 갱신: {count}개 레이어 준비 완료.",
+        "msg_transforming": "변환 적용 중...",
+        "msg_transform_success": "✅ 변환 완료 (H:{h}, V:{v}, 각도:{a})",
+        "msg_transform_fail": "❌ 변환 실패: {error}",
         "err_no_ase_clip": "❌ [Error] 클립보드에 Aseprite 데이터가 없습니다.",
         "set_title": "⚙️ 브릿지 설정",
         "set_ps_path": "Photoshop 경로:",
@@ -320,7 +346,10 @@ LANG = {
                        "👉 이 방법을 사용하면 Recent 목록 문제 없이 쾌적하게 작업할 수 있습니다.",
         "tut_dont_show": "다음 실행부터 이 창을 띄우지 않음",
         "btn_flip_h": "↔ 좌우 반전",
-        "btn_flip_v": "↕ 상하 반전"
+        "btn_flip_v": "↕ 상하 반전",
+        "btn_rotate": "↻ 90° 회전",
+        "btn_undo": "↩ Undo",
+        "btn_redo": "↪ Redo"
     },
     "en": {
         "title": "Ase-PS Bridge Pro",
@@ -873,8 +902,8 @@ class BridgeApp(QMainWindow):
         except:
             pass
 
-        self.setMinimumSize(380, 620)
-        self.resize(380, 620)
+        self.setMinimumSize(440, 620) # 너비 확장 (380 -> 440)
+        self.resize(440, 620)
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.Window)
         
         # 앱 아이콘 설정 (빌드된 .exe 파일 내부에서 아이콘 추출)
@@ -898,8 +927,14 @@ class BridgeApp(QMainWindow):
         self.current_job_path = None
         self.clipboard_source = None 
         self.clipboard_count = 0
-        self.flipped_h = False
-        self.flipped_v = False
+        
+        # 변환 상태 관리
+        self.cur_h = False
+        self.cur_v = False
+        self.cur_angle = 0
+        self.undo_stack = []
+        self.redo_stack = []
+        
         self.processed_jobs = set()
         
         # 설정 불러오기 및 초기화
@@ -999,21 +1034,41 @@ class BridgeApp(QMainWindow):
         """)
         layout.addWidget(self.preview_label, alignment=Qt.AlignCenter)
 
-        # === 🔄 반전(Flip) 컨트롤 영역 ===
+        # === 🔄 변환(Transform) 컨트롤 영역 ===
         flip_layout = QHBoxLayout()
         self.btn_flip_h = QPushButton(self.t.get("btn_flip_h", "↔ 좌우 반전"))
         self.btn_flip_v = QPushButton(self.t.get("btn_flip_v", "↕ 상하 반전"))
+        self.btn_rotate = QPushButton(self.t.get("btn_rotate", "↻ 90° 회전"))
+        
         self.btn_flip_h.setEnabled(False)
         self.btn_flip_v.setEnabled(False)
+        self.btn_rotate.setEnabled(False)
         
-        self.btn_flip_h.setStyleSheet("background-color: #4b5563; color: white; border-radius: 4px; padding: 5px;")
-        self.btn_flip_v.setStyleSheet("background-color: #4b5563; color: white; border-radius: 4px; padding: 5px;")
+        btn_style = "background-color: #4b5563; color: white; border-radius: 4px; padding: 5px;"
+        self.btn_flip_h.setStyleSheet(btn_style)
+        self.btn_flip_v.setStyleSheet(btn_style)
+        self.btn_rotate.setStyleSheet(btn_style)
 
-        self.btn_flip_h.clicked.connect(lambda: self.flip_current_job("horizontal"))
-        self.btn_flip_v.clicked.connect(lambda: self.flip_current_job("vertical"))
+        # Undo/Redo 버튼
+        self.btn_undo = QPushButton(self.t.get("btn_undo", "↩ Undo"))
+        self.btn_redo = QPushButton(self.t.get("btn_redo", "↪ Redo"))
+        self.btn_undo.setEnabled(False)
+        self.btn_redo.setEnabled(False)
+        self.btn_undo.setStyleSheet(btn_style)
+        self.btn_redo.setStyleSheet(btn_style)
 
+        # 클릭 이벤트 연결 (Lambda 제거)
+        self.btn_flip_h.clicked.connect(self.handle_flip_h)
+        self.btn_flip_v.clicked.connect(self.handle_flip_v)
+        self.btn_rotate.clicked.connect(self.handle_rotate)
+        self.btn_undo.clicked.connect(self.handle_undo)
+        self.btn_redo.clicked.connect(self.handle_redo)
+
+        flip_layout.addWidget(self.btn_undo)
         flip_layout.addWidget(self.btn_flip_h)
         flip_layout.addWidget(self.btn_flip_v)
+        flip_layout.addWidget(self.btn_rotate)
+        flip_layout.addWidget(self.btn_redo)
         layout.addLayout(flip_layout)
 
         # 정렬 모드
@@ -1093,9 +1148,12 @@ class BridgeApp(QMainWindow):
         self.btn_tutorial.setText(self.t["btn_tutorial"])
         self.btn_settings.setText(self.t["btn_settings"])
         
-        # 반전 버튼 텍스트 갱신
+        # 변환 버튼 텍스트 갱신
         self.btn_flip_h.setText(self.t.get("btn_flip_h", "↔ 좌우 반전"))
         self.btn_flip_v.setText(self.t.get("btn_flip_v", "↕ 상하 반전"))
+        self.btn_rotate.setText(self.t.get("btn_rotate", "↻ 90° 회전"))
+        self.btn_undo.setText(self.t.get("btn_undo", "↩ Undo"))
+        self.btn_redo.setText(self.t.get("btn_redo", "↪ Redo"))
 
         if not self.last_job_id:
             self.update_status(self.t["clip_empty"], "#f3f4f6", "#374151")
@@ -1223,8 +1281,7 @@ class BridgeApp(QMainWindow):
     def clear_preview(self):
         self.preview_label.clear()
         self.preview_label.setText("No Preview")
-        self.btn_flip_h.setEnabled(False)
-        self.btn_flip_v.setEnabled(False)
+        self.update_btn_interact(False)
 
     def start_preview_generation(self, job_path):
         self.preview_label.setText("Generating Preview...")
@@ -1255,11 +1312,15 @@ class BridgeApp(QMainWindow):
                         self.clipboard_count = count
                         self.current_job_path = payload.get("job_path")
 
+                        # 새로운 Job 감지 시 상태 초기화
+                        self.undo_stack.clear()
+                        self.redo_stack.clear()
+                        self.cur_h, self.cur_v, self.cur_angle = False, False, 0
+
                         if self.current_job_path and os.path.exists(self.current_job_path):
                             self.start_preview_generation(self.current_job_path)
 
-                        self.btn_flip_h.setEnabled(True)
-                        self.btn_flip_v.setEnabled(True)
+                        self.update_btn_interact(True)
 
                         if source == "photoshop":
                             msg = self.t["clip_ready"].format(src="PS", dst="Ase", count=count)
@@ -1277,49 +1338,88 @@ class BridgeApp(QMainWindow):
         except Exception:
             pass
 
-        if self.last_job_id is not None:
-            self.last_job_id = None
-            self.clipboard_source = None
-            self.update_status(self.t["clip_empty"], "#f3f4f6", "#374151")
-            self.btn_ase_paste.setEnabled(False)
-            self.btn_ps_paste.setEnabled(False)
-            self.clear_preview() # 🌟 [신규 추가] 클립보드가 비워지면 프리뷰도 초기화
+        # ⚠️ [안정성 패치] 클립보드에 데이터가 없다고 해서 상태를 즉시 초기화하지 않음.
+        # 단순히 상태 라벨만 비워주고, 현재 job_path는 유지하여 변환 기능이 풀리지 않게 함.
+        if self.last_job_id is not None and not data:
+            # self.last_job_id = None # 이 줄을 주석 처리하여 상태 유지
+            # self.update_status(self.t["clip_empty"], "#f3f4f6", "#374151")
+            pass
+
     def update_status(self, text, bg_color, text_color):
         self.status_label.setText(text)
         self.status_label.setStyleSheet(f"padding: 10px; background-color: {bg_color}; color: {text_color}; border-radius: 5px; font-weight: bold;")
 
-    # 🌟 [신규 추가] Job Transform 처리 메서드
-    def flip_current_job(self, direction):
-        if not self.last_job_id or not self.current_job_path:
-            return
-        
-        if not os.path.exists(self.current_job_path):
+    # === 변환(Transform) 안정성 패치 영역 ===
+    def update_btn_interact(self, state: bool):
+        """모든 변환 버튼의 활성화 상태를 안전하게 제어"""
+        base_btns = [self.btn_flip_h, self.btn_flip_v, self.btn_rotate]
+        for b in base_btns:
+            b.setEnabled(state)
+
+        # Undo/Redo는 스택 상태에 따라 결정
+        self.btn_undo.setEnabled(state and len(self.undo_stack) > 0)
+        self.btn_redo.setEnabled(state and len(self.redo_stack) > 0)
+
+    def handle_flip_h(self):
+        if not self.current_job_path: return
+        self.undo_stack.append((self.cur_h, self.cur_v, self.cur_angle))
+        self.redo_stack.clear()
+        self.cur_h = not self.cur_h
+        self.execute_worker()
+
+    def handle_flip_v(self):
+        if not self.current_job_path: return
+        self.undo_stack.append((self.cur_h, self.cur_v, self.cur_angle))
+        self.redo_stack.clear()
+        self.cur_v = not self.cur_v
+        self.execute_worker()
+
+    def handle_rotate(self):
+        if not self.current_job_path: return
+        self.undo_stack.append((self.cur_h, self.cur_v, self.cur_angle))
+        self.redo_stack.clear()
+        self.cur_angle = (self.cur_angle + 90) % 360
+        self.execute_worker()
+
+    def handle_undo(self):
+        if not self.undo_stack: return
+        self.redo_stack.append((self.cur_h, self.cur_v, self.cur_angle))
+        self.cur_h, self.cur_v, self.cur_angle = self.undo_stack.pop()
+        self.execute_worker()
+
+    def handle_redo(self):
+        if not self.redo_stack: return
+        self.undo_stack.append((self.cur_h, self.cur_v, self.cur_angle))
+        self.cur_h, self.cur_v, self.cur_angle = self.redo_stack.pop()
+        self.execute_worker()
+
+    def execute_worker(self):
+        """중복 실행을 방지하며 변환 워커 실행"""
+        if not self.current_job_path or not os.path.exists(self.current_job_path):
             return
 
-        # 상태 토글
-        if direction == "horizontal":
-            self.flipped_h = not self.flipped_h
-        elif direction == "vertical":
-            self.flipped_v = not self.flipped_v
+        if hasattr(self, "transform_worker") and self.transform_worker.isRunning():
+            return
 
-        self.btn_flip_h.setEnabled(False)
-        self.btn_flip_v.setEnabled(False)
+        self.update_btn_interact(False)
         self.btn_ase_paste.setEnabled(False)
         self.btn_ps_paste.setEnabled(False)
-        
-        self.preview_label.setText(f"Applying transformation...")
+        self.preview_label.setText(self.t.get("msg_transforming", "Transforming..."))
 
-        # 현재 누적된 모든 반전 상태(H, V)를 워커에 전달
-        self.transform_worker = JobTransformWorker(self.current_job_path, self.flipped_h, self.flipped_v)
-        self.transform_worker.transform_done.connect(self.on_transform_finished)
+        self.transform_worker = JobTransformWorker(
+            self.current_job_path, 
+            self.cur_h, 
+            self.cur_v, 
+            self.cur_angle
+        )
+        self.transform_worker.transform_done.connect(self.on_transform_success)
         self.transform_worker.error.connect(self.on_transform_error)
         self.transform_worker.log.connect(self.log_message)
         self.transform_worker.start()
 
-    def on_transform_finished(self, flip_h, flip_v):
-        self.btn_flip_h.setEnabled(True)
-        self.btn_flip_v.setEnabled(True)
-        
+    def on_transform_success(self):
+        self.update_btn_interact(True)
+        # Paste 버튼 복구
         if self.clipboard_source == "photoshop":
             self.btn_ase_paste.setEnabled(True)
         elif self.clipboard_source == "aseprite":
@@ -1328,14 +1428,22 @@ class BridgeApp(QMainWindow):
         if self.current_job_path:
             self.start_preview_generation(self.current_job_path)
         
-        status_msg = f"Transform applied (H:{flip_h}, V:{flip_v})"
-        self.log_message(f"✅ {status_msg}")
+        msg = self.t.get("msg_transform_success", "✅ Transform applied").format(
+            h=self.cur_h, v=self.cur_v, a=self.cur_angle
+        )
+        self.log_message(msg)
 
     def on_transform_error(self, msg):
-        self.btn_flip_h.setEnabled(True)
-        self.btn_flip_v.setEnabled(True)
-        self.log_message(f"❌ Flip Error: {msg}")
-        self.preview_label.setText("Flip Failed")
+        self.update_btn_interact(True)
+        # Paste 버튼 복구
+        if self.clipboard_source == "photoshop":
+            self.btn_ase_paste.setEnabled(True)
+        elif self.clipboard_source == "aseprite":
+            self.btn_ps_paste.setEnabled(True)
+
+        err_msg = self.t.get("msg_transform_fail", "❌ Transform failed").format(error=msg)
+        self.log_message(err_msg)
+        self.preview_label.setText("Transform Failed")
 
     # === Actions ===
     def run_ps_copy(self):
@@ -1405,6 +1513,12 @@ class BridgeApp(QMainWindow):
             self.log_message(self.t["msg_ps_success"])
         else:
             self.log_message(f"❌ [PS Error] {msg}")
+
+    def closeEvent(self, event):
+        """종료 시 실행 중인 워커 안전하게 종료"""
+        if hasattr(self, "transform_worker") and self.transform_worker.isRunning():
+            self.transform_worker.wait(1000)
+        super().closeEvent(event)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
