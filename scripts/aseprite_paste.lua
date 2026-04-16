@@ -1,6 +1,5 @@
 -- scripts/aseprite_paste.lua
 -- Ase-PS Bridge Pro - Paste Action (Aseprite)
--- 지원: Layer/Group 계층(Tree) 구조 완벽 전송 및 평면(Flat) 레이어 덮어쓰기
 
 local function decodeJson(str)
     if type(json) == "table" and json.decode then return json.decode(str) end
@@ -8,6 +7,18 @@ local function decodeJson(str)
     obj.signature = str:match('"signature"%s*:%s*"([^"]+)"')
     obj.job_path = str:match('"job_path"%s*:%s*"([^"]+)"')
     return obj
+end
+
+-- [표준 변환 정책 1] Bridge 백분율(0~100) -> Aseprite 스케일(0~255)
+local function opacityPercentToAse255(value)
+    local n = tonumber(value)
+    if n == nil then n = 100 end
+    
+    if n <= 0 then return 0 end
+    if n >= 100 then return 255 end
+    
+    -- 소수점 이하 오차(254.999...)를 안전하게 255로 반올림(+0.5 후 버림)
+    return math.floor(n * 255 / 100 + 0.5)
 end
 
 local function showMessage(msg)
@@ -54,7 +65,6 @@ local function writeLog(msg)
 end
 os.remove(jobPath .. "/debug_ase_paste.log")
 writeLog("=== Aseprite Paste Debug Log ===")
-writeLog("Align Mode: " .. tostring(payload.settings and payload.settings.align_mode))
 
 local metaFile = io.open(jobPath .. "/metadata.json", "r")
 if not metaFile then
@@ -85,7 +95,6 @@ if payload.settings and payload.settings.align_mode then
     alignMode = payload.settings.align_mode
 end
 
--- 1. [공통] 전략 분기점 판별: 그룹이 하나라도 있는지 확인
 local hasGroup = false
 for i = 1, #elementsList do
     if elementsList[i].type == "group" then
@@ -93,11 +102,8 @@ for i = 1, #elementsList do
         break
     end
 end
-writeLog("Has Group: " .. tostring(hasGroup))
 
--- 2. [공통] Bounding Box 기반 Offset 계산 (그룹 제외, 보이는 레이어 중심)
 local minX, minY, maxX, maxY
--- 1차 시도: 눈이 켜져 있는(visible) 레이어만으로 Bounding Box 계산 (배경 등 숨긴 레이어 때문에 중심축이 어긋나는 현상 방지)
 for i = 1, #elementsList do
     local el = elementsList[i]
     if el.type ~= "group" and el.visible ~= false then
@@ -113,7 +119,6 @@ for i = 1, #elementsList do
     end
 end
 
--- 만약 모든 레이어가 숨김 처리되어 있다면 전체 레이어로 2차 계산
 if minX == nil then
     for i = 1, #elementsList do
         local el = elementsList[i]
@@ -131,8 +136,6 @@ if minX == nil then
     end
 end
 
-writeLog("Bounding Box - minX: " .. tostring(minX) .. ", minY: " .. tostring(minY) .. ", maxX: " .. tostring(maxX) .. ", maxY: " .. tostring(maxY))
-
 local offsetX, offsetY = 0, 0
 if minX ~= nil and alignMode ~= "absolute" then
     local contentWidth = maxX - minX
@@ -142,9 +145,6 @@ if minX ~= nil and alignMode ~= "absolute" then
     
     offsetX = math.floor((spr.width - contentWidth) / 2) - minX
     offsetY = math.floor((spr.height - contentHeight) / 2) - minY
-    
-    writeLog("Calculated - contentWidth: " .. contentWidth .. ", contentHeight: " .. contentHeight)
-    writeLog("Offsets - offsetX: " .. offsetX .. ", offsetY: " .. offsetY)
 end
 
 local importedCount = 0
@@ -153,12 +153,7 @@ local frame = app.activeFrame or 1
 app.transaction(function()
 
     if not hasGroup then
-        -- ==========================================
-        -- 분기 1: Legacy Flat Overwrite Mode
-        -- 그룹이 없으면 기존 레이어를 덮어씌움
-        -- ==========================================
-        
-        -- 순수 그리기 레이어만 추출 (그룹 내부에 있는 레이어도 모두 수집)
+        -- [분기 1] Flat Overwrite
         local flatLayers = {}
         local function collectFlat(layersCollection)
             for _, l in ipairs(layersCollection) do
@@ -169,9 +164,7 @@ app.transaction(function()
         collectFlat(spr.layers)
 
         local targetLayers = {}
-        
-        -- 단일 선택 또는 미선택 (자동 공간 유추 - Active Layer 기준 아래로 덮어쓰기)
-        local activeIdx = #flatLayers -- 선택이 없으면 캔버스의 가장 위쪽 레이어부터
+        local activeIdx = #flatLayers
         if app.activeLayer and not app.activeLayer.isGroup then
             for i, l in ipairs(flatLayers) do
                 if l == app.activeLayer then
@@ -181,15 +174,8 @@ app.transaction(function()
             end
         end
 
-        -- 포토샵에서 가져온 레이어 뭉치 중 '가장 위쪽(Top) 레이어'가 현재 Aseprite의 Active Layer에 안착하도록,
-        -- 시작점(Bottom)을 Active Layer보다 아래쪽으로 계산하여 내려갑니다.
         local bottomIdx = activeIdx - #elementsList + 1
-
-        -- 만약 아래쪽으로 덮어쓸 레이어가 모자라다면 (1번 레이어보다 밑으로 뚫고 내려갈 경우),
-        -- 어쩔 수 없이 1번 레이어부터 위로 채워넣도록 방어합니다.
-        if bottomIdx < 1 then 
-            bottomIdx = 1 
-        end
+        if bottomIdx < 1 then bottomIdx = 1 end
 
         for i = 1, #elementsList do
             local l = flatLayers[bottomIdx + i - 1]
@@ -210,7 +196,9 @@ app.transaction(function()
                 imgFile:close()
                 local img = Image{ fromFile = fullImagePath }
                 if img then
-                    targetLayer.opacity = math.floor((tonumber(el.opacity) or 100) * 2.55)
+                    -- Opacity 적용 및 디버그 로깅
+                    local originalOpacity = el.opacity
+                    local targetOpacity = opacityPercentToAse255(originalOpacity)
                     
                     local existingCel = targetLayer:cel(frame.frameNumber)
                     if existingCel then spr:deleteCel(existingCel) end
@@ -222,17 +210,17 @@ app.transaction(function()
                         finalY = tonumber(el.y) or 0
                     end
                     
-                    spr:newCel(targetLayer, frame, img, Point(finalX, finalY))
+                    local newCel = spr:newCel(targetLayer, frame, img, Point(finalX, finalY))
+                    newCel.opacity = targetOpacity
+                    writeLog(string.format("[Flat Layer %d] Name: %s | Opacity: raw %s -> converted %s -> applied to cel", i, el.name, tostring(originalOpacity), tostring(targetOpacity)))
+                    
                     importedCount = importedCount + 1
                 end
             end
         end
 
     else
-        -- ==========================================
-        -- 분기 2: Hierarchy Reconstruct Mode
-        -- 그룹이 있으면 안전하게 통째로 새 트리 생성
-        -- ==========================================
+        -- [분기 2] Hierarchy Reconstruct
         local treeMap = {}
         for i = 1, #elementsList do
             local el = elementsList[i]
@@ -260,7 +248,13 @@ app.transaction(function()
                 if el.type == "group" then
                     newObj = spr:newGroup()
                     newObj.name = el.name
-                    newObj.opacity = math.floor((tonumber(el.opacity) or 100) * 2.55)
+                    
+                    -- Opacity 적용 및 디버그 로깅 (Group)
+                    local originalOpacity = el.opacity
+                    local targetOpacity = opacityPercentToAse255(originalOpacity)
+                    newObj.opacity = targetOpacity
+                    writeLog(string.format("[Hierarchy Group] Name: %s | Opacity (Bridge JSON 0-100): %s -> Aseprite (0-255): %s", el.name, tostring(originalOpacity), tostring(targetOpacity)))
+                    
                     if targetParentObj ~= spr then newObj.parent = targetParentObj end
                     buildHierarchy(el.id, newObj)
                 else
@@ -272,7 +266,11 @@ app.transaction(function()
                         if importedImage then
                             newObj = spr:newLayer()
                             newObj.name = el.name or "Layer"
-                            newObj.opacity = math.floor((tonumber(el.opacity) or 100) * 2.55)
+                            
+                            -- Opacity 적용 및 디버그 로깅 (Layer)
+                            local originalOpacity = el.opacity
+                            local targetOpacity = opacityPercentToAse255(originalOpacity)
+                            
                             if targetParentObj ~= spr then newObj.parent = targetParentObj end
                             
                             local finalX = (tonumber(el.x) or 0) + offsetX
@@ -282,7 +280,10 @@ app.transaction(function()
                                 finalY = tonumber(el.y) or 0
                             end
                             
-                            spr:newCel(newObj, frame, importedImage, Point(finalX, finalY))
+                            local newCel = spr:newCel(newObj, frame, importedImage, Point(finalX, finalY))
+                            newCel.opacity = targetOpacity
+                            writeLog(string.format("[Hierarchy Layer] Name: %s | Opacity: raw %s -> converted %s -> applied to cel", el.name, tostring(originalOpacity), tostring(targetOpacity)))
+                            
                             importedCount = importedCount + 1
                         end
                     end

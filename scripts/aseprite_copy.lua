@@ -175,7 +175,7 @@ local function traverseItems(items, parentId)
                     name = item.name,
                     parent_id = parentId,
                     index = localIndex,
-                    opacity = math.floor(((tonumber(item.opacity) or 255) / 255) * 100),
+                    opacity = math.floor(((tonumber(item.opacity) or 255) / 255) * 100 + 0.5),
                     visible = item.isVisible
                 })
                 localIndex = localIndex + 1
@@ -208,7 +208,7 @@ local function traverseItems(items, parentId)
                         y = bounds.y,
                         width = bounds.width,
                         height = bounds.height,
-                        opacity = math.floor(((tonumber(item.opacity) or 255) / 255) * 100),
+                        opacity = math.floor(((tonumber(item.opacity) or 255) / 255) * 100 + 0.5),
                         visible = item.isVisible,
                         file = "layers/" .. fileName
                     })
