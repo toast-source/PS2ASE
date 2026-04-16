@@ -1116,9 +1116,10 @@ class BridgeApp(QMainWindow):
                         self.last_job_id = job_id
                         self.clipboard_source = source
 
-                        # 🌟 [신규 추가] 새로운 작업 감지 시 백그라운드 프리뷰 렌더링 시작!
                         job_path = payload.get("job_path")
                         if job_path and os.path.exists(job_path):
+                            # UI가 job_path를 받았지만 파일 쓰기가 덜 끝났을 가능성을 대비하여,
+                            # 워커 내부에서 status_done.json을 기다림
                             self.start_preview_generation(job_path)
 
                         if source == "photoshop":
