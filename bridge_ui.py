@@ -298,7 +298,7 @@ LANG = {
         "msg_detecting": "경로 자동 탐지 중...",
         "msg_detect_fail": "❌ 필수 실행 파일 경로를 찾지 못했습니다.",
         "msg_detect_success": "✅ 프로그램 설치 경로 자동 탐지 완료!",
-        "msg_ase_setup_success": "✅ Aseprite 스크립트/단축키(F4/F5) 맵핑 완료!",
+        "msg_ase_setup_success": "✅ Aseprite 스크립트/단축키(F4/F5) 맵핑 완료! (단축키를 쓰기 전에 메뉴에서 수동 실행하여 Trust 승인 필요)",
         "msg_ase_setup_fail": "⚠️ Aseprite 단축키 맵핑 실패 (수동 설정 필요).",
         "msg_settings_saved": "✅ 설정이 저장되었습니다.",
         "msg_clean_success": "✅ 임시 폴더(Temp)가 깨끗하게 정리되었습니다! 확보된 용량: {size}MB",
@@ -316,6 +316,7 @@ LANG = {
         "msg_generating_preview": "미리보기 생성 중...",
         "msg_preview_failed": "미리보기 생성 실패",
         "err_no_ase_clip": "❌ [Error] 클립보드에 Aseprite 데이터가 없습니다.",
+        "msg_ase_trust_err": "💡 힌트: 단축키가 작동하지 않거나 엉뚱한 창이 뜬다면, Aseprite 상단 메뉴 [File] ➔ [Scripts] 에서 직접 스크립트를 한 번씩 클릭하여 'Trust' 권한을 승인해 주세요.",
         "set_title": "⚙️ 브릿지 설정",
         "set_ps_path": "Photoshop 경로:",
         "set_ase_path": "Aseprite 경로:",
@@ -337,7 +338,11 @@ LANG = {
                        "<b>⭐ 정렬 모드 설명 (Alignment)</b><br>"
                        "• <b>Center (중앙 정렬)</b>: 캔버스 크기가 달라도 캐릭터 덩어리를 화면 정중앙에 맞춰서 붙여넣습니다. (기본/권장)<br>"
                        "• <b>Absolute (절대 좌표)</b>: 중앙 보정 없이 원래 있던 좌표 그대로 꽂아넣습니다. (양쪽 캔버스 사이즈가 똑같을 때만 쓰세요)<br><br>"
-                       "<b>📌 Recent Files 정리 팁 (중요)</b><br>"
+                       "<b>⚠️ Warnings</b><br>"
+                       "• <b>[필수] 최초 1회 스크립트 권한 승인</b><br>"
+                       "  Aseprite의 보안 정책상, 단축키(F4/F5)를 누르기 전에 <b>반드시 상단 메뉴 [File] ➔ [Scripts]</b>에서 <b>aseprite_copy</b>와 <b>aseprite_paste</b>를 각각 수동으로 한 번씩 클릭해야 합니다.<br>"
+                       "  경고창이 뜨면 <b>'Give full trust to this script(이 스크립트를 전적으로 신뢰함)'</b>에 체크하고 OK를 누르세요. 이후부터는 단축키가 정상 작동합니다.<br><br>"
+                       "• <b>Aseprite 'Recent files' list may get messy</b><br>"
                        "Ase-PS Bridge Pro는 픽셀 정확성과 레이어 보존을 위해 임시 이미지를 생성하여 Aseprite에 불러옵니다.<br>"
                        "이 과정에서 Aseprite의 '최근 파일(Recent Files)' 목록에 임시 파일들이 추가될 수 있습니다. 이는 정상적인 동작이며, 원본 데이터에는 전혀 영향을 주지 않습니다.<br><br>"
                        "<b>✔ 추천 작업 방식</b><br>"
@@ -375,7 +380,7 @@ LANG = {
         "msg_detecting": "Auto-detecting paths...",
         "msg_detect_fail": "❌ Failed to detect essential executable paths.",
         "msg_detect_success": "✅ Auto-detection of program paths completed!",
-        "msg_ase_setup_success": "✅ Aseprite scripts & hotkeys (F4/F5) mapped successfully!",
+        "msg_ase_setup_success": "✅ Aseprite scripts & hotkeys (F4/F5) mapped successfully! (You must run them manually from the menu once to grant Trust permissions)",
         "msg_ase_setup_fail": "⚠️ Failed to map Aseprite hotkeys (Manual setup required).",
         "msg_settings_saved": "✅ Settings saved successfully.",
         "msg_clean_success": "✅ Temp folder cleaned successfully! Freed space: {size}MB",
@@ -393,6 +398,7 @@ LANG = {
         "msg_generating_preview": "Generating Preview...",
         "msg_preview_failed": "Preview Generation Failed",
         "err_no_ase_clip": "❌ [Error] No Aseprite data in clipboard.",
+        "msg_ase_trust_err": "💡 Hint: If hotkeys (F4/F5) don't work or open wrong windows, go to Aseprite menu [File] ➔ [Scripts] and click the scripts manually once to grant 'Trust' permissions.",
         "set_title": "⚙️ Bridge Settings",
         "set_ps_path": "Photoshop Path:",
         "set_ase_path": "Aseprite Path:",
@@ -414,6 +420,9 @@ LANG = {
                        "• <b>Center</b>: Auto-centers the bounding box of copied layers to the target canvas. (Recommended)<br>"
                        "• <b>Absolute</b>: Keeps the exact original X/Y coordinates. (Use only when canvas sizes are identical)<br><br>"
                        "<b>⚠️ Warnings</b><br>"
+                       "• <b>[REQUIRED] First-time Script Trust Approval</b><br>"
+                       "  Due to Aseprite's security policy, before using hotkeys (F4/F5), you <b>MUST manually click</b> <b>aseprite_copy</b> and <b>aseprite_paste</b> from the top menu: <b>[File] ➔ [Scripts]</b> once.<br>"
+                       "  When the warning popup appears, check <b>'Give full trust to this script'</b> and click OK. Hotkeys will work normally afterwards.<br><br>"
                        "• <b>Aseprite 'Recent files' list may get messy</b><br>"
                        "  To ensure perfect pixel transfer, this tool repeatedly opens and closes temporary PNG files in the background, which will leave traces in Aseprite's recent files list.",
         "tut_dont_show": "Do not show this window on startup"
@@ -435,7 +444,7 @@ LANG = {
         "msg_detecting": "パスの自動検出中...",
         "msg_detect_fail": "❌ 必須の実行ファイルパスが見つかりませんでした。",
         "msg_detect_success": "✅ プログラムのインストールパス自動検出完了！",
-        "msg_ase_setup_success": "✅ Asepriteスクリプト/ショートカット(F4/F5)のマッピング完了！",
+        "msg_ase_setup_success": "✅ Asepriteスクリプト/ショートカット(F4/F5)のマッピング完了！ (ショートカットを使う前に、メニューから1回手動で実行してTrust権限を承認してください)",
         "msg_ase_setup_fail": "⚠️ Asepriteショートカットのマッピング失敗 (手動設定が必要)。",
         "msg_settings_saved": "✅ 設定が保存されました。",
         "msg_clean_success": "✅ 一時フォルダ(Temp)が整理されました！確保された容量: {size}MB",
@@ -1549,7 +1558,7 @@ class BridgeApp(QMainWindow):
         self.log_message(self.t["msg_ase_pasting"])
         self.ase_worker = AsepriteWorker(self.settings.get("aseprite_exe"), self.ase_paste_lua_orig, trigger_hotkey=True)
         self.ase_worker.finished.connect(lambda: self.btn_ase_paste.setEnabled(True))
-        self.ase_worker.error.connect(lambda e: (self.btn_ase_paste.setEnabled(True), self.log_message(f"❌ [Ase Error] {e}")))
+        self.ase_worker.error.connect(lambda e: (self.btn_ase_paste.setEnabled(True), self.log_message(f"❌ [Ase Error] {e}\n{self.t.get('msg_ase_trust_err', '')}")))
         self.ase_worker.log.connect(self.log_message)
         self.ase_worker.start()
 
@@ -1558,7 +1567,7 @@ class BridgeApp(QMainWindow):
         self.log_message(self.t["msg_ase_copying"])
         self.ase_worker = AsepriteWorker(self.settings.get("aseprite_exe"), self.ase_copy_lua_orig, trigger_hotkey=True)
         self.ase_worker.finished.connect(lambda: self.btn_ase_copy.setEnabled(True))
-        self.ase_worker.error.connect(lambda e: (self.btn_ase_copy.setEnabled(True), self.log_message(f"❌ [Ase Error] {e}")))
+        self.ase_worker.error.connect(lambda e: (self.btn_ase_copy.setEnabled(True), self.log_message(f"❌ [Ase Error] {e}\n{self.t.get('msg_ase_trust_err', '')}")))
         self.ase_worker.log.connect(self.log_message)
         self.ase_worker.start()
 
