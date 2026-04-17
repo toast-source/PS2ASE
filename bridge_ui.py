@@ -559,9 +559,12 @@ def setup_aseprite_environment(orig_paste_lua: str, orig_copy_lua: str) -> (bool
     target_paste_lua = os.path.join(scripts_dir, "aseprite_paste.lua")
     target_copy_lua = os.path.join(scripts_dir, "aseprite_copy.lua")
     
+    import filecmp
     try:
-        shutil.copy2(orig_paste_lua, target_paste_lua)
-        shutil.copy2(orig_copy_lua, target_copy_lua)
+        if not os.path.exists(target_paste_lua) or not filecmp.cmp(orig_paste_lua, target_paste_lua, shallow=False):
+            shutil.copy2(orig_paste_lua, target_paste_lua)
+        if not os.path.exists(target_copy_lua) or not filecmp.cmp(orig_copy_lua, target_copy_lua, shallow=False):
+            shutil.copy2(orig_copy_lua, target_copy_lua)
     except Exception as e:
         return False, f"Script copy failed: {e}"
 
@@ -912,28 +915,10 @@ class TutorialDialog(QDialog):
 class BridgeApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        
-        # 윈도우 작업표시줄 아이콘 강제 적용 (Python 기본 아이콘 덮어쓰기)
-        import ctypes
-        myappid = 'southpawgames.bridgepro.1.1'
-        try:
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-        except:
-            pass
 
         self.setMinimumSize(440, 620) # 너비 확장 (380 -> 440)
         self.resize(440, 620)
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.Window)
-        
-        # 앱 아이콘 설정 (빌드된 .exe 파일 내부에서 아이콘 추출)
-        from PySide6.QtGui import QIcon
-        if getattr(sys, 'frozen', False):
-            icon_dir = sys._MEIPASS # PyInstaller 임시 압축해제 폴더
-        else:
-            icon_dir = BASE_DIR
-        icon_path = os.path.join(icon_dir, "bridge_icon.ico")
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
 
         # 경로 캐싱
         self.ps_copy_jsx = os.path.join(BASE_DIR, "scripts", "photoshop_copy.jsx")
@@ -1613,8 +1598,27 @@ class BridgeApp(QMainWindow):
         super().closeEvent(event)
 
 if __name__ == "__main__":
+    # 윈도우 작업표시줄 아이콘 강제 적용 (Python 기본 아이콘 덮어쓰기)
+    import ctypes
+    myappid = 'southpawgames.bridgepro.1.1'
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    except:
+        pass
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    
+    # 앱 전체 기본 아이콘 설정 (Taskbar 및 모든 창)
+    from PySide6.QtGui import QIcon
+    if getattr(sys, 'frozen', False):
+        icon_dir = sys._MEIPASS
+    else:
+        icon_dir = BASE_DIR
+    icon_path = os.path.join(icon_dir, "bridge_icon.ico")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+
     window = BridgeApp()
     window.show()
     sys.exit(app.exec())
