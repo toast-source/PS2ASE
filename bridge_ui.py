@@ -131,19 +131,17 @@ class JobTransformWorker(QThread):
         except Exception as e:
             self.error.emit(f"Transform error: {str(e)}")
 
-        except Exception as e:
-            self.error.emit(f"변환 에러: {str(e)}")
-
 # ==========================================
 # Preview Generator Worker (UI 멈춤 방지용 비동기 합성기)
 # ==========================================
 class PreviewGeneratorWorker(QThread):
-    preview_ready = Signal(bytes)
+    preview_ready = Signal(bytes, str) # Added job_id for validation
     preview_failed = Signal(str)
 
-    def __init__(self, job_path):
+    def __init__(self, job_path, job_id):
         super().__init__()
         self.job_path = job_path
+        self.job_id = job_id
 
     def run(self):
         try:
@@ -259,7 +257,7 @@ class PreviewGeneratorWorker(QThread):
             buf = io.BytesIO()
             base_canvas.save(buf, format="PNG")
             
-            self.preview_ready.emit(buf.getvalue())
+            self.preview_ready.emit(buf.getvalue(), self.job_id)
             
         except Exception as e:
             self.preview_failed.emit(f"합성 에러: {str(e)}")
@@ -314,6 +312,9 @@ LANG = {
         "msg_transforming": "변환 적용 중...",
         "msg_transform_success": "✅ 변환 완료 (H:{h}, V:{v}, 각도:{a})",
         "msg_transform_fail": "❌ 변환 실패: {error}",
+        "msg_transform_failed": "변환 실패",
+        "msg_generating_preview": "미리보기 생성 중...",
+        "msg_preview_failed": "미리보기 생성 실패",
         "err_no_ase_clip": "❌ [Error] 클립보드에 Aseprite 데이터가 없습니다.",
         "set_title": "⚙️ 브릿지 설정",
         "set_ps_path": "Photoshop 경로:",
@@ -364,6 +365,12 @@ LANG = {
         "btn_ps_paste": "4. Paste to Photoshop",
         "btn_settings": "⚙️ Settings",
         "btn_clean": "🗑️ Clean Temp",
+        "btn_flip_h": "↔ Flip Horizontal",
+        "btn_flip_v": "↕ Flip Vertical",
+        "btn_rotate": "↻ Rotate 90°",
+        "btn_undo": "↩ Undo",
+        "btn_redo": "↪ Redo",
+        "btn_tutorial": "❓ Tutorial",
         "msg_started": "🚀 Bridge Pro Bi-directional UI Started.",
         "msg_detecting": "Auto-detecting paths...",
         "msg_detect_fail": "❌ Failed to detect essential executable paths.",
@@ -379,6 +386,12 @@ LANG = {
         "msg_ase_pasting": "Aseprite: Pasting layers...",
         "msg_ps_success": "✅ Photoshop task completed successfully!",
         "msg_clip_update": "Clipboard updated: {count} layers ready.",
+        "msg_transforming": "Applying transformation...",
+        "msg_transform_success": "✅ Transform applied (H:{h}, V:{v}, Angle:{a})",
+        "msg_transform_fail": "❌ Transform failed: {error}",
+        "msg_transform_failed": "Transform Failed",
+        "msg_generating_preview": "Generating Preview...",
+        "msg_preview_failed": "Preview Generation Failed",
         "err_no_ase_clip": "❌ [Error] No Aseprite data in clipboard.",
         "set_title": "⚙️ Bridge Settings",
         "set_ps_path": "Photoshop Path:",
@@ -388,7 +401,6 @@ LANG = {
         "set_lang": "Language (언어):",
         "set_hotkey": "Aseprite Hotkey Status:",
         "set_force_reinstall": "Force Reinstall Aseprite Scripts/Hotkeys",
-        "btn_tutorial": "❓ Tutorial",
         "tut_title": "📖 How to use",
         "tut_content": "<b>[ 💡 Ase-PS Bridge Pro Guide ]</b><br><br>"
                        "<b>1. PS ➔ Aseprite</b><br>"
@@ -404,9 +416,7 @@ LANG = {
                        "<b>⚠️ Warnings</b><br>"
                        "• <b>Aseprite 'Recent files' list may get messy</b><br>"
                        "  To ensure perfect pixel transfer, this tool repeatedly opens and closes temporary PNG files in the background, which will leave traces in Aseprite's recent files list.",
-        "tut_dont_show": "Do not show this window on startup",
-        "btn_flip_h": "↔ Flip Horizontal",
-        "btn_flip_v": "↕ Flip Vertical"
+        "tut_dont_show": "Do not show this window on startup"
     },
     "ja": {
         "title": "Ase-PS Bridge Pro",
@@ -466,7 +476,16 @@ LANG = {
                        "3. 必要に応じてRecentリストを定期的に整理してください。",
         "tut_dont_show": "次回からこのウィンドウを表示しない",
         "btn_flip_h": "↔ 左右反転",
-        "btn_flip_v": "↕ 上下反転"
+        "btn_flip_v": "↕ 上下反転",
+        "btn_rotate": "↻ 90° 回転",
+        "btn_undo": "↩ 元に戻す",
+        "btn_redo": "↪ やり直し",
+        "msg_transforming": "変形を適用中...",
+        "msg_transform_success": "✅ 変形完了 (H:{h}, V:{v}, 角度:{a})",
+        "msg_transform_fail": "❌ 変形失敗: {error}",
+        "msg_transform_failed": "変形失敗",
+        "msg_generating_preview": "プレビュー生成中...",
+        "msg_preview_failed": "プレビュー生成失敗"
     }
 }
 
@@ -936,6 +955,11 @@ class BridgeApp(QMainWindow):
         self.redo_stack = []
         
         self.processed_jobs = set()
+        self.clipboard_empty_count = 0
+        self.ui_busy_transform = False
+        self.ui_busy_preview = False
+        self.pending_preview_path = None
+        self.pending_preview_id = None
         
         # 설정 불러오기 및 초기화
         self.settings = load_settings()
@@ -1026,7 +1050,7 @@ class BridgeApp(QMainWindow):
         self.preview_label.setFixedSize(350, 160)
         self.preview_label.setStyleSheet("""
             background-color: #e5e7eb;
-            background-image: repeating-linear-gradient(45deg, #d1d5db 25%, transparent 25%, transparent 75%, #d1d5db 75%, #d1d5db), repeating-linear-gradient(45deg, #d1d5db 25%, #e5e7eb 25%, #e5e7eb 75%, #d1d5db 75%, #d1d5db);
+            background-image: repeating-linear-gradient(45deg, #d1d5db 25%, transparent 25%, transparent 75%, #d1d5db 75%, #d1d5db);
             background-position: 0 0, 10px 10px;
             background-size: 20px 20px;
             border-radius: 5px;
@@ -1208,6 +1232,13 @@ class BridgeApp(QMainWindow):
             self.clipboard_source = None 
             self.clipboard_count = 0
             self.processed_jobs = set()
+            
+            # 🌟 [추가] 변환 및 프리뷰 플래그/예약 상태 초기화
+            self.ui_busy_transform = False
+            self.ui_busy_preview = False
+            self.pending_preview_path = None
+            self.pending_preview_id = None
+            
             self.update_status(self.t["clip_empty"], "#f3f4f6", "#374151")
             self.btn_ase_paste.setEnabled(False)
             self.btn_ps_paste.setEnabled(False)
@@ -1278,17 +1309,80 @@ class BridgeApp(QMainWindow):
         pixmap.loadFromData(img_bytes, "PNG")
         self.preview_label.setPixmap(pixmap)
 
+    def is_transforming(self):
+        return self.ui_busy_transform or (hasattr(self, "transform_worker") and self.transform_worker.isRunning())
+
+    def is_previewing(self):
+        return self.ui_busy_preview or (hasattr(self, "preview_worker") and self.preview_worker.isRunning())
+
+    def update_ui_state(self):
+        """Job 유효성 및 모든 워커 상태를 검증하여 일관된 UI 상태 유지"""
+        valid_job = (self.last_job_id is not None) and \
+                    (self.current_job_path is not None) and \
+                    (os.path.exists(self.current_job_path))
+        
+        transforming = self.is_transforming()
+        previewing = self.is_previewing()
+        
+        # [변환 버튼군] - 파일 수정 작업 중이거나 프리뷰 합성 중일 때 잠금
+        can_transform = valid_job and not transforming and not previewing
+        self.btn_flip_h.setEnabled(can_transform)
+        self.btn_flip_v.setEnabled(can_transform)
+        self.btn_rotate.setEnabled(can_transform)
+        self.btn_undo.setEnabled(can_transform and len(self.undo_stack) > 0)
+        self.btn_redo.setEnabled(can_transform and len(self.redo_stack) > 0)
+        
+        # [붙여넣기 버튼군] - 파일 수정(Transform) 중에만 잠금. 프리뷰 중에는 허용.
+        can_paste = valid_job and not transforming
+        self.btn_ase_paste.setEnabled(can_paste and self.clipboard_source == "photoshop")
+        self.btn_ps_paste.setEnabled(can_paste and self.clipboard_source == "aseprite")
+
     def clear_preview(self):
         self.preview_label.clear()
         self.preview_label.setText("No Preview")
-        self.update_btn_interact(False)
+        self.update_ui_state()
 
     def start_preview_generation(self, job_path):
-        self.preview_label.setText("Generating Preview...")
-        self.preview_worker = PreviewGeneratorWorker(job_path)
-        self.preview_worker.preview_ready.connect(self.set_preview_image)
-        self.preview_worker.preview_failed.connect(lambda msg: self.preview_label.setText(f"Preview Failed"))
+        if not job_path or not os.path.exists(job_path): return
+        
+        # 이미 실행 중이면 예약만 하고 리턴
+        if self.is_previewing():
+            self.pending_preview_path = job_path
+            self.pending_preview_id = self.last_job_id
+            return
+
+        self.ui_busy_preview = True
+        self.pending_preview_path = None
+        self.pending_preview_id = None
+        
+        self.preview_label.setText(self.t.get("msg_generating_preview", "Generating Preview..."))
+        self.preview_worker = PreviewGeneratorWorker(job_path, self.last_job_id)
+        self.preview_worker.preview_ready.connect(self.on_preview_success)
+        self.preview_worker.preview_failed.connect(self.on_preview_failed)
         self.preview_worker.start()
+        self.update_ui_state()
+
+    def on_preview_success(self, img_bytes, worker_job_id):
+        if worker_job_id == self.last_job_id:
+            self.set_preview_image(img_bytes)
+        self.finish_preview_job()
+
+    def on_preview_failed(self, msg):
+        self.preview_label.setText(self.t.get("msg_preview_failed", "Preview Failed"))
+        self.log_message(f"⚠️ Preview error: {msg}")
+        self.finish_preview_job()
+
+    def finish_preview_job(self):
+        self.ui_busy_preview = False
+        self.update_ui_state()
+
+        p_path = self.pending_preview_path
+        p_id = self.pending_preview_id
+        self.pending_preview_path = None
+        self.pending_preview_id = None
+
+        if p_path and p_id == self.last_job_id:
+            self.start_preview_generation(p_path)
 
     def check_clipboard(self):
         import win32clipboard
@@ -1300,110 +1394,109 @@ class BridgeApp(QMainWindow):
             win32clipboard.CloseClipboard()
 
             if data:
-                payload = json.loads(data)
-                if payload.get("signature") == "ase_ps_bridge_payload":
-                    job_id = payload.get("job_id")
-                    source = payload.get("source_app", "unknown")
-                    count = payload.get("summary", {}).get("layer_count", 0)
+                try:
+                    payload = json.loads(data)
+                    if payload.get("signature") == "ase_ps_bridge_payload":
+                        self.clipboard_empty_count = 0
+                        job_id = payload.get("job_id")
+                        source = payload.get("source_app", "unknown")
+                        count = payload.get("summary", {}).get("layer_count", 0)
 
-                    if job_id != self.last_job_id:
-                        self.last_job_id = job_id
-                        self.clipboard_source = source
-                        self.clipboard_count = count
-                        self.current_job_path = payload.get("job_path")
+                        if job_id != self.last_job_id:
+                            self.last_job_id = job_id
+                            self.clipboard_source = source
+                            self.clipboard_count = count
+                            self.current_job_path = payload.get("job_path")
 
-                        # 새로운 Job 감지 시 상태 초기화
-                        self.undo_stack.clear()
-                        self.redo_stack.clear()
-                        self.cur_h, self.cur_v, self.cur_angle = False, False, 0
+                            self.undo_stack.clear()
+                            self.redo_stack.clear()
+                            self.cur_h, self.cur_v, self.cur_angle = False, False, 0
 
-                        if self.current_job_path and os.path.exists(self.current_job_path):
-                            self.start_preview_generation(self.current_job_path)
+                            if self.current_job_path and os.path.exists(self.current_job_path):
+                                self.start_preview_generation(self.current_job_path)
 
-                        self.update_btn_interact(True)
+                            self.update_ui_state()
 
-                        if source == "photoshop":
-                            msg = self.t["clip_ready"].format(src="PS", dst="Ase", count=count)
-                            self.update_status(msg, "#dbeafe", "#1e40af")
-                            self.btn_ase_paste.setEnabled(True)
-                            self.btn_ps_paste.setEnabled(False)
-                        elif source == "aseprite":
-                            msg = self.t["clip_ready"].format(src="Ase", dst="PS", count=count)
-                            self.update_status(msg, "#fef3c7", "#b45309")
-                            self.btn_ps_paste.setEnabled(True)
-                            self.btn_ase_paste.setEnabled(False)
+                            if source == "photoshop":
+                                msg = self.t["clip_ready"].format(src="PS", dst="Ase", count=count)
+                                self.update_status(msg, "#dbeafe", "#1e40af")
+                            elif source == "aseprite":
+                                msg = self.t["clip_ready"].format(src="Ase", dst="PS", count=count)
+                                self.update_status(msg, "#fef3c7", "#b45309")
 
-                        self.log_message(self.t["msg_clip_update"].format(count=count))
-                    return
+                            self.log_message(self.t["msg_clip_update"].format(count=count))
+                        return
+                except: pass
         except Exception:
             pass
 
-        # ⚠️ [안정성 패치] 클립보드에 데이터가 없다고 해서 상태를 즉시 초기화하지 않음.
-        # 단순히 상태 라벨만 비워주고, 현재 job_path는 유지하여 변환 기능이 풀리지 않게 함.
-        if self.last_job_id is not None and not data:
-            # self.last_job_id = None # 이 줄을 주석 처리하여 상태 유지
-            # self.update_status(self.t["clip_empty"], "#f3f4f6", "#374151")
-            pass
+        if self.last_job_id is not None:
+            self.clipboard_empty_count += 1
+            path_missing = self.current_job_path and not os.path.exists(self.current_job_path)
+            
+            if self.clipboard_empty_count >= 5 or path_missing:
+                self.last_job_id = None
+                self.current_job_path = None
+                self.clipboard_source = None
+                self.clipboard_count = 0
+                self.undo_stack.clear()
+                self.redo_stack.clear()
+                self.cur_h, self.cur_v, self.cur_angle = False, False, 0
+                self.clipboard_empty_count = 0
+                
+                self.ui_busy_transform = False
+                self.ui_busy_preview = False
+                self.pending_preview_path = None
+                self.pending_preview_id = None
+                
+                self.update_status(self.t["clip_empty"], "#f3f4f6", "#374151")
+                self.clear_preview()
+                self.log_message("Stale job state cleared.")
 
     def update_status(self, text, bg_color, text_color):
         self.status_label.setText(text)
         self.status_label.setStyleSheet(f"padding: 10px; background-color: {bg_color}; color: {text_color}; border-radius: 5px; font-weight: bold;")
 
     # === 변환(Transform) 안정성 패치 영역 ===
-    def update_btn_interact(self, state: bool):
-        """모든 변환 버튼의 활성화 상태를 안전하게 제어"""
-        base_btns = [self.btn_flip_h, self.btn_flip_v, self.btn_rotate]
-        for b in base_btns:
-            b.setEnabled(state)
-
-        # Undo/Redo는 스택 상태에 따라 결정
-        self.btn_undo.setEnabled(state and len(self.undo_stack) > 0)
-        self.btn_redo.setEnabled(state and len(self.redo_stack) > 0)
-
     def handle_flip_h(self):
-        if not self.current_job_path: return
+        if self.is_transforming() or not self.current_job_path: return
         self.undo_stack.append((self.cur_h, self.cur_v, self.cur_angle))
         self.redo_stack.clear()
         self.cur_h = not self.cur_h
         self.execute_worker()
 
     def handle_flip_v(self):
-        if not self.current_job_path: return
+        if self.is_transforming() or not self.current_job_path: return
         self.undo_stack.append((self.cur_h, self.cur_v, self.cur_angle))
         self.redo_stack.clear()
         self.cur_v = not self.cur_v
         self.execute_worker()
 
     def handle_rotate(self):
-        if not self.current_job_path: return
+        if self.is_transforming() or not self.current_job_path: return
         self.undo_stack.append((self.cur_h, self.cur_v, self.cur_angle))
         self.redo_stack.clear()
         self.cur_angle = (self.cur_angle + 90) % 360
         self.execute_worker()
 
     def handle_undo(self):
-        if not self.undo_stack: return
+        if self.is_transforming() or not self.undo_stack: return
         self.redo_stack.append((self.cur_h, self.cur_v, self.cur_angle))
         self.cur_h, self.cur_v, self.cur_angle = self.undo_stack.pop()
         self.execute_worker()
 
     def handle_redo(self):
-        if not self.redo_stack: return
+        if self.is_transforming() or not self.redo_stack: return
         self.undo_stack.append((self.cur_h, self.cur_v, self.cur_angle))
         self.cur_h, self.cur_v, self.cur_angle = self.redo_stack.pop()
         self.execute_worker()
 
     def execute_worker(self):
-        """중복 실행을 방지하며 변환 워커 실행"""
-        if not self.current_job_path or not os.path.exists(self.current_job_path):
-            return
+        if not self.current_job_path or not os.path.exists(self.current_job_path): return
+        if self.is_transforming(): return
 
-        if hasattr(self, "transform_worker") and self.transform_worker.isRunning():
-            return
-
-        self.update_btn_interact(False)
-        self.btn_ase_paste.setEnabled(False)
-        self.btn_ps_paste.setEnabled(False)
+        self.ui_busy_transform = True
+        self.update_ui_state()
         self.preview_label.setText(self.t.get("msg_transforming", "Transforming..."))
 
         self.transform_worker = JobTransformWorker(
@@ -1418,15 +1511,16 @@ class BridgeApp(QMainWindow):
         self.transform_worker.start()
 
     def on_transform_success(self):
-        self.update_btn_interact(True)
-        # Paste 버튼 복구
-        if self.clipboard_source == "photoshop":
-            self.btn_ase_paste.setEnabled(True)
-        elif self.clipboard_source == "aseprite":
-            self.btn_ps_paste.setEnabled(True)
-
+        """연속적인 Busy 상태 유지를 위해 순서 조정"""
+        # 1. 프리뷰 생성을 먼저 시작 (ui_busy_preview가 True가 됨)
         if self.current_job_path:
             self.start_preview_generation(self.current_job_path)
+            
+        # 2. 그 다음 트랜스폼 점유 해제
+        self.ui_busy_transform = False
+        
+        # 3. 마지막으로 UI 갱신 (프리뷰 때문에 변환 버튼은 계속 비활성 유지됨)
+        self.update_ui_state()
         
         msg = self.t.get("msg_transform_success", "✅ Transform applied").format(
             h=self.cur_h, v=self.cur_v, a=self.cur_angle
@@ -1434,16 +1528,12 @@ class BridgeApp(QMainWindow):
         self.log_message(msg)
 
     def on_transform_error(self, msg):
-        self.update_btn_interact(True)
-        # Paste 버튼 복구
-        if self.clipboard_source == "photoshop":
-            self.btn_ase_paste.setEnabled(True)
-        elif self.clipboard_source == "aseprite":
-            self.btn_ps_paste.setEnabled(True)
-
+        self.ui_busy_transform = False
+        self.update_ui_state()
         err_msg = self.t.get("msg_transform_fail", "❌ Transform failed").format(error=msg)
         self.log_message(err_msg)
-        self.preview_label.setText("Transform Failed")
+        # 하드코딩 제거: 다국어 지원되는 msg_transform_failed 사용
+        self.preview_label.setText(self.t.get("msg_transform_failed", "Transform Failed"))
 
     # === Actions ===
     def run_ps_copy(self):
@@ -1518,6 +1608,8 @@ class BridgeApp(QMainWindow):
         """종료 시 실행 중인 워커 안전하게 종료"""
         if hasattr(self, "transform_worker") and self.transform_worker.isRunning():
             self.transform_worker.wait(1000)
+        if hasattr(self, "preview_worker") and self.preview_worker.isRunning():
+            self.preview_worker.wait(1000)
         super().closeEvent(event)
 
 if __name__ == "__main__":
