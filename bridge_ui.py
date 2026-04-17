@@ -342,7 +342,7 @@ LANG = {
                        "• <b>[필수] 최초 1회 스크립트 권한 승인</b><br>"
                        "  Aseprite의 보안 정책상, 단축키(F4/F5)를 누르기 전에 <b>반드시 상단 메뉴 [File] ➔ [Scripts]</b>에서 <b>aseprite_copy</b>와 <b>aseprite_paste</b>를 각각 수동으로 한 번씩 클릭해야 합니다.<br>"
                        "  경고창이 뜨면 <b>'Give full trust to this script(이 스크립트를 전적으로 신뢰함)'</b>에 체크하고 OK를 누르세요. 이후부터는 단축키가 정상 작동합니다.<br><br>"
-                       "• <b>Aseprite 'Recent files' list may get messy</b><br>"
+                       "• <b>Aseprite의 '최근 파일(Recent Files)' 목록이 지저분해질 수 있습니다</b><br>"
                        "Ase-PS Bridge Pro는 픽셀 정확성과 레이어 보존을 위해 임시 이미지를 생성하여 Aseprite에 불러옵니다.<br>"
                        "이 과정에서 Aseprite의 '최근 파일(Recent Files)' 목록에 임시 파일들이 추가될 수 있습니다. 이는 정상적인 동작이며, 원본 데이터에는 전혀 영향을 주지 않습니다.<br><br>"
                        "<b>✔ 추천 작업 방식</b><br>"
@@ -456,6 +456,7 @@ LANG = {
         "msg_ps_success": "✅ Photoshopの作業が正常に完了しました！",
         "msg_clip_update": "クリップボード更新: {count}個のレイヤーが準備完了。",
         "err_no_ase_clip": "❌ [Error] クリップボードにAsepriteのデータがありません。",
+        "msg_ase_trust_err": "💡 ヒント: ショートカットが効かない、または別の機能が開く場合は、Asepriteの上部メニュー [File] ➔ [Scripts] から手動でスクリプトを1回ずつクリックし、「Trust(信頼)」権限を承認してください。",
         "set_title": "⚙️ ブリッジ設定",
         "set_ps_path": "Photoshopのパス:",
         "set_ase_path": "Asepriteのパス:",
@@ -477,7 +478,11 @@ LANG = {
                        "<b>⭐ 配置モードの説明 (Alignment)</b><br>"
                        "• <b>Center (中央揃え)</b>: キャンバスのサイズが異なっても、キャラクター全体を画面の中央に合わせてペーストします。(推奨)<br>"
                        "• <b>Absolute (絶対座標)</b>: 中央補正を行わず、元の座標のままペーストします。(両方のキャンバスサイズが完全に同じ時だけ使用してください)<br><br>"
-                       "<b>📌 Recent Files 整理のヒント (重要)</b><br>"
+                       "<b>⚠️ Warnings (注意事項)</b><br>"
+                       "• <b>[必須] 初回実行時のスクリプト権限承認</b><br>"
+                       "  Asepriteのセキュリティポリシーにより、ショートカット(F4/F5)を使用する前に、<b>必ず上部メニュー [File] ➔ [Scripts]</b> から <b>aseprite_copy</b> と <b>aseprite_paste</b> を手動で1回ずつクリックしてください。<br>"
+                       "  警告窓が表示されたら、<b>'Give full trust to this script(このスクリプトを完全に信頼する)'</b> にチェックを入れてOKを押します。以降はショートカットが正常に動作します。<br><br>"
+                       "• <b>Asepriteの「最近開いたファイル(Recent files)」リストが汚れる可能性があります</b><br>"
                        "完璧なピクセル転送のため、バックグラウンドで一時的なPNGファイルを開閉します。そのため、Asepriteの「最近開いたファイル(Recent files)」リストに一時ファイルが残る場合があります。これは正常な動作であり、データに影響はありません。<br><br>"
                        "<b>✔ お勧めの作業方法</b><br>"
                        "1. よく使う作業ファイルは<b>「お気に入り(Favorites)」</b>に追加してください。<br>"
@@ -508,7 +513,7 @@ def load_settings():
                 return json.load(f)
         except:
             pass
-    return {"language": "ko"} # 기본값 한국어
+    return {"language": "en"} # 기본값 영어
 
 def save_settings(settings):
     try:
@@ -956,8 +961,33 @@ class BridgeApp(QMainWindow):
         self.pending_preview_id = None
         
         # 설정 불러오기 및 초기화
+        is_first_run = not os.path.exists(SETTINGS_FILE)
         self.settings = load_settings()
-        self.current_lang = self.settings.get("language", "ko")
+        
+        # 첫 실행 시 언어 선택 팝업 (취소 시 영어 기본값)
+        if is_first_run:
+            try:
+                from PySide6.QtWidgets import QInputDialog
+                items = ["English", "한국어", "日本語"]
+                item, ok = QInputDialog.getItem(None, "Language / 언어 / 言語", "Select Language:", items, 0, False)
+                if ok and item:
+                    if item == "한국어":
+                        self.settings["language"] = "ko"
+                    elif item == "日本語":
+                        self.settings["language"] = "ja"
+                    else:
+                        self.settings["language"] = "en"
+                else:
+                    self.settings["language"] = "en"
+                save_settings(self.settings)
+            except Exception:
+                self.settings["language"] = "en"
+                save_settings(self.settings)
+
+        self.current_lang = self.settings.get("language", "en") # 기본값 fallback 보장
+        if self.current_lang not in LANG:
+            self.current_lang = "en"
+            
         self.t = LANG[self.current_lang]
         
         self.setWindowTitle(self.t["title"])
@@ -996,7 +1026,7 @@ class BridgeApp(QMainWindow):
             updated = True
             
         if not self.settings.get("language"):
-            self.settings["language"] = "ko"
+            self.settings["language"] = "en"
             updated = True
 
         if updated:
