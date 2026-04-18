@@ -424,7 +424,12 @@ LANG = {
                        "  Due to Aseprite's security policy, before using hotkeys (F4/F5), you <b>MUST manually click</b> <b>aseprite_copy</b> and <b>aseprite_paste</b> from the top menu: <b>[File] ➔ [Scripts]</b> once.<br>"
                        "  When the warning popup appears, check <b>'Give full trust to this script'</b> and click OK. Hotkeys will work normally afterwards.<br><br>"
                        "• <b>Aseprite 'Recent files' list may get messy</b><br>"
-                       "  To ensure perfect pixel transfer, this tool repeatedly opens and closes temporary PNG files in the background, which will leave traces in Aseprite's recent files list.",
+                       "  To ensure perfect pixel transfer, this tool repeatedly opens and closes temporary PNG files in the background, which will leave traces in Aseprite's recent files list.<br><br>"
+                       "<b>✔ Recommended workflow</b><br>"
+                       "1. Add your working files to <b>'Favorites'</b> in Aseprite.<br>"
+                       "2. Always work from the Favorites list instead of Recent files.<br>"
+                       "3. Occasionally clean up the Recent files list if needed.<br>"
+                       "👉 This workflow avoids the Recent files issue and keeps your workspace stable.",
         "tut_dont_show": "Do not show this window on startup"
     },
     "ja": {
@@ -957,6 +962,7 @@ class BridgeApp(QMainWindow):
         self.clipboard_empty_count = 0
         self.ui_busy_transform = False
         self.ui_busy_preview = False
+        self.ui_busy_transfer = False
         self.pending_preview_path = None
         self.pending_preview_id = None
         
@@ -1339,6 +1345,11 @@ class BridgeApp(QMainWindow):
     def is_previewing(self):
         return self.ui_busy_preview or (hasattr(self, "preview_worker") and self.preview_worker.isRunning())
 
+    def is_transferring(self):
+        return getattr(self, "ui_busy_transfer", False) or \
+               (hasattr(self, "ps_worker") and self.ps_worker.isRunning()) or \
+               (hasattr(self, "ase_worker") and self.ase_worker.isRunning())
+
     def update_ui_state(self):
         """Job 유효성 및 모든 워커 상태를 검증하여 일관된 UI 상태 유지"""
         valid_job = (self.last_job_id is not None) and \
@@ -1347,17 +1358,22 @@ class BridgeApp(QMainWindow):
         
         transforming = self.is_transforming()
         previewing = self.is_previewing()
+        transferring = self.is_transferring()
         
-        # [변환 버튼군] - 파일 수정 작업 중이거나 프리뷰 합성 중일 때 잠금
-        can_transform = valid_job and not transforming and not previewing
+        # [변환 버튼군] - 파일 수정 작업, 프리뷰 합성, 전송 작업 중일 때 잠금
+        can_transform = valid_job and not transforming and not previewing and not transferring
         self.btn_flip_h.setEnabled(can_transform)
         self.btn_flip_v.setEnabled(can_transform)
         self.btn_rotate.setEnabled(can_transform)
         self.btn_undo.setEnabled(can_transform and len(self.undo_stack) > 0)
         self.btn_redo.setEnabled(can_transform and len(self.redo_stack) > 0)
         
-        # [붙여넣기 버튼군] - 파일 수정(Transform) 중에만 잠금. 프리뷰 중에는 허용.
-        can_paste = valid_job and not transforming
+        # [복사/붙여넣기 버튼군] - 전송 및 변환 작업 중에는 잠금
+        can_transfer = not transferring and not transforming
+        self.btn_ps_copy.setEnabled(can_transfer)
+        self.btn_ase_copy.setEnabled(can_transfer)
+        
+        can_paste = valid_job and can_transfer
         self.btn_ase_paste.setEnabled(can_paste and self.clipboard_source == "photoshop")
         self.btn_ps_paste.setEnabled(can_paste and self.clipboard_source == "aseprite")
 
@@ -1379,22 +1395,30 @@ class BridgeApp(QMainWindow):
         self.pending_preview_path = None
         self.pending_preview_id = None
         
-        self.preview_label.setText(self.t.get("msg_generating_preview", "Generating Preview..."))
-        self.preview_worker = PreviewGeneratorWorker(job_path, self.last_job_id)
-        self.preview_worker.preview_ready.connect(self.on_preview_success)
-        self.preview_worker.preview_failed.connect(self.on_preview_failed)
-        self.preview_worker.start()
-        self.update_ui_state()
+        try:
+            self.preview_label.setText(self.t.get("msg_generating_preview", "Generating Preview..."))
+            self.preview_worker = PreviewGeneratorWorker(job_path, self.last_job_id)
+            self.preview_worker.preview_ready.connect(self.on_preview_success)
+            self.preview_worker.preview_failed.connect(self.on_preview_failed)
+            self.preview_worker.start()
+            self.update_ui_state()
+        except Exception as e:
+            self.log_message(f"⚠️ Preview start failed: {e}")
+            self.finish_preview_job()
 
     def on_preview_success(self, img_bytes, worker_job_id):
-        if worker_job_id == self.last_job_id:
-            self.set_preview_image(img_bytes)
-        self.finish_preview_job()
+        try:
+            if worker_job_id == self.last_job_id:
+                self.set_preview_image(img_bytes)
+        finally:
+            self.finish_preview_job()
 
     def on_preview_failed(self, msg):
-        self.preview_label.setText(self.t.get("msg_preview_failed", "Preview Failed"))
-        self.log_message(f"⚠️ Preview error: {msg}")
-        self.finish_preview_job()
+        try:
+            self.preview_label.setText(self.t.get("msg_preview_failed", "Preview Failed"))
+            self.log_message(f"⚠️ Preview error: {msg}")
+        finally:
+            self.finish_preview_job()
 
     def finish_preview_job(self):
         self.ui_busy_preview = False
@@ -1521,112 +1545,180 @@ class BridgeApp(QMainWindow):
 
         self.ui_busy_transform = True
         self.update_ui_state()
-        self.preview_label.setText(self.t.get("msg_transforming", "Transforming..."))
+        
+        try:
+            self.preview_label.setText(self.t.get("msg_transforming", "Transforming..."))
 
-        self.transform_worker = JobTransformWorker(
-            self.current_job_path, 
-            self.cur_h, 
-            self.cur_v, 
-            self.cur_angle
-        )
-        self.transform_worker.transform_done.connect(self.on_transform_success)
-        self.transform_worker.error.connect(self.on_transform_error)
-        self.transform_worker.log.connect(self.log_message)
-        self.transform_worker.start()
+            self.transform_worker = JobTransformWorker(
+                self.current_job_path, 
+                self.cur_h, 
+                self.cur_v, 
+                self.cur_angle
+            )
+            self.transform_worker.transform_done.connect(self.on_transform_success)
+            self.transform_worker.error.connect(self.on_transform_error)
+            self.transform_worker.log.connect(self.log_message)
+            self.transform_worker.start()
+        except Exception as e:
+            self.ui_busy_transform = False
+            self.update_ui_state()
+            self.log_message(f"❌ Transform start failed: {e}")
 
     def on_transform_success(self):
         """연속적인 Busy 상태 유지를 위해 순서 조정"""
-        # 1. 프리뷰 생성을 먼저 시작 (ui_busy_preview가 True가 됨)
-        if self.current_job_path:
-            self.start_preview_generation(self.current_job_path)
+        try:
+            # 1. 프리뷰 생성을 먼저 시작 (ui_busy_preview가 True가 됨)
+            if self.current_job_path:
+                self.start_preview_generation(self.current_job_path)
             
-        # 2. 그 다음 트랜스폼 점유 해제
-        self.ui_busy_transform = False
-        
-        # 3. 마지막으로 UI 갱신 (프리뷰 때문에 변환 버튼은 계속 비활성 유지됨)
-        self.update_ui_state()
-        
-        msg = self.t.get("msg_transform_success", "✅ Transform applied").format(
-            h=self.cur_h, v=self.cur_v, a=self.cur_angle
-        )
-        self.log_message(msg)
+            msg = self.t.get("msg_transform_success", "✅ Transform applied").format(
+                h=self.cur_h, v=self.cur_v, a=self.cur_angle
+            )
+            self.log_message(msg)
+        finally:
+            # 2. 그 다음 트랜스폼 점유 해제
+            self.ui_busy_transform = False
+            
+            # 3. 마지막으로 UI 갱신 (프리뷰 때문에 변환 버튼은 계속 비활성 유지됨)
+            self.update_ui_state()
 
     def on_transform_error(self, msg):
         self.ui_busy_transform = False
-        self.update_ui_state()
-        err_msg = self.t.get("msg_transform_fail", "❌ Transform failed").format(error=msg)
-        self.log_message(err_msg)
-        # 하드코딩 제거: 다국어 지원되는 msg_transform_failed 사용
-        self.preview_label.setText(self.t.get("msg_transform_failed", "Transform Failed"))
+        try:
+            err_msg = self.t.get("msg_transform_fail", "❌ Transform failed").format(error=msg)
+            self.log_message(err_msg)
+            # 하드코딩 제거: 다국어 지원되는 msg_transform_failed 사용
+            self.preview_label.setText(self.t.get("msg_transform_failed", "Transform Failed"))
+        finally:
+            self.update_ui_state()
 
     # === Actions ===
     def run_ps_copy(self):
-        self.btn_ps_copy.setEnabled(False)
-        self.log_message(self.t["msg_ps_copying"])
+        if self.is_transferring() or self.is_transforming(): return
+        self.ui_busy_transfer = True
+        self.update_ui_state()
         
-        import uuid
-        job_id = "bridge_job_" + time.strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:4]
-        
-        self.ps_worker = PhotoshopCLIWorker(
-            self.ps_copy_jsx, 
-            self.settings.get("photoshop_exe"), 
-            job_id, 
-            self.temp_dir, 
-            self.get_align_mode()
-        )
-        self.ps_worker.finished.connect(self.on_ps_copy_finished)
-        self.ps_worker.log.connect(self.log_message)
-        self.ps_worker.start()
+        try:
+            self.log_message(self.t["msg_ps_copying"])
+            
+            import uuid
+            job_id = "bridge_job_" + time.strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:4]
+            
+            self.ps_worker = PhotoshopCLIWorker(
+                self.ps_copy_jsx, 
+                self.settings.get("photoshop_exe"), 
+                job_id, 
+                self.temp_dir, 
+                self.get_align_mode()
+            )
+            self.ps_worker.finished.connect(self.on_ps_copy_finished)
+            self.ps_worker.log.connect(self.log_message)
+            self.ps_worker.start()
+        except Exception as e:
+            self.ui_busy_transfer = False
+            self.update_ui_state()
+            self.log_message(f"❌ [PS Error] {e}")
 
     def on_ps_copy_finished(self, success, msg):
-        self.btn_ps_copy.setEnabled(True)
-        if not success:
-            self.log_message(f"❌ [PS Error] {msg}")
+        self.ui_busy_transfer = False
+        try:
+            if not success:
+                self.log_message(f"❌ [PS Error] {msg}")
+        finally:
+            self.update_ui_state()
 
     def run_ase_paste(self):
-        self.btn_ase_paste.setEnabled(False)
-        self.log_message(self.t["msg_ase_pasting"])
-        self.ase_worker = AsepriteWorker(self.settings.get("aseprite_exe"), self.ase_paste_lua_orig, trigger_hotkey=True)
-        self.ase_worker.finished.connect(lambda: self.btn_ase_paste.setEnabled(True))
-        self.ase_worker.error.connect(lambda e: (self.btn_ase_paste.setEnabled(True), self.log_message(f"❌ [Ase Error] {e}\n{self.t.get('msg_ase_trust_err', '')}")))
-        self.ase_worker.log.connect(self.log_message)
-        self.ase_worker.start()
+        if self.is_transferring() or self.is_transforming(): return
+        self.ui_busy_transfer = True
+        self.update_ui_state()
+        
+        try:
+            self.log_message(self.t["msg_ase_pasting"])
+            self.ase_worker = AsepriteWorker(self.settings.get("aseprite_exe"), self.ase_paste_lua_orig, trigger_hotkey=True)
+            self.ase_worker.finished.connect(self.on_ase_paste_finished)
+            self.ase_worker.error.connect(self.on_ase_paste_error)
+            self.ase_worker.log.connect(self.log_message)
+            self.ase_worker.start()
+        except Exception as e:
+            self.ui_busy_transfer = False
+            self.update_ui_state()
+            self.log_message(f"❌ [Ase Error] {e}\n{self.t.get('msg_ase_trust_err', '')}")
+
+    def on_ase_paste_finished(self):
+        self.ui_busy_transfer = False
+        self.update_ui_state()
+        
+    def on_ase_paste_error(self, e):
+        self.ui_busy_transfer = False
+        try:
+            self.log_message(f"❌ [Ase Error] {e}\n{self.t.get('msg_ase_trust_err', '')}")
+        finally:
+            self.update_ui_state()
 
     def run_ase_copy(self):
-        self.btn_ase_copy.setEnabled(False)
-        self.log_message(self.t["msg_ase_copying"])
-        self.ase_worker = AsepriteWorker(self.settings.get("aseprite_exe"), self.ase_copy_lua_orig, trigger_hotkey=True)
-        self.ase_worker.finished.connect(lambda: self.btn_ase_copy.setEnabled(True))
-        self.ase_worker.error.connect(lambda e: (self.btn_ase_copy.setEnabled(True), self.log_message(f"❌ [Ase Error] {e}\n{self.t.get('msg_ase_trust_err', '')}")))
-        self.ase_worker.log.connect(self.log_message)
-        self.ase_worker.start()
+        if self.is_transferring() or self.is_transforming(): return
+        self.ui_busy_transfer = True
+        self.update_ui_state()
+        
+        try:
+            self.log_message(self.t["msg_ase_copying"])
+            self.ase_worker = AsepriteWorker(self.settings.get("aseprite_exe"), self.ase_copy_lua_orig, trigger_hotkey=True)
+            self.ase_worker.finished.connect(self.on_ase_copy_finished)
+            self.ase_worker.error.connect(self.on_ase_copy_error)
+            self.ase_worker.log.connect(self.log_message)
+            self.ase_worker.start()
+        except Exception as e:
+            self.ui_busy_transfer = False
+            self.update_ui_state()
+            self.log_message(f"❌ [Ase Error] {e}\n{self.t.get('msg_ase_trust_err', '')}")
+
+    def on_ase_copy_finished(self):
+        self.ui_busy_transfer = False
+        self.update_ui_state()
+        
+    def on_ase_copy_error(self, e):
+        self.ui_busy_transfer = False
+        try:
+            self.log_message(f"❌ [Ase Error] {e}\n{self.t.get('msg_ase_trust_err', '')}")
+        finally:
+            self.update_ui_state()
 
     def run_ps_paste(self):
-        self.btn_ps_paste.setEnabled(False)
-        self.log_message(self.t["msg_ps_pasting"])
-        
+        if self.is_transferring() or self.is_transforming(): return
         if not self.last_job_id:
             self.log_message(self.t["err_no_ase_clip"])
-            self.btn_ps_paste.setEnabled(True)
             return
 
-        self.ps_worker = PhotoshopCLIWorker(
-            self.ps_paste_jsx, 
-            self.settings.get("photoshop_exe"), 
-            self.last_job_id, 
-            self.temp_dir, 
-            self.get_align_mode()
-        )
-        self.ps_worker.finished.connect(self.on_ps_paste_finished)
-        self.ps_worker.log.connect(self.log_message)
-        self.ps_worker.start()
+        self.ui_busy_transfer = True
+        self.update_ui_state()
+        
+        try:
+            self.log_message(self.t["msg_ps_pasting"])
+
+            self.ps_worker = PhotoshopCLIWorker(
+                self.ps_paste_jsx, 
+                self.settings.get("photoshop_exe"), 
+                self.last_job_id, 
+                self.temp_dir, 
+                self.get_align_mode()
+            )
+            self.ps_worker.finished.connect(self.on_ps_paste_finished)
+            self.ps_worker.log.connect(self.log_message)
+            self.ps_worker.start()
+        except Exception as e:
+            self.ui_busy_transfer = False
+            self.update_ui_state()
+            self.log_message(f"❌ [PS Error] {e}")
 
     def on_ps_paste_finished(self, success, msg):
-        self.btn_ps_paste.setEnabled(True)
-        if success:
-            self.log_message(self.t["msg_ps_success"])
-        else:
-            self.log_message(f"❌ [PS Error] {msg}")
+        self.ui_busy_transfer = False
+        try:
+            if success:
+                self.log_message(self.t["msg_ps_success"])
+            else:
+                self.log_message(f"❌ [PS Error] {msg}")
+        finally:
+            self.update_ui_state()
 
     def closeEvent(self, event):
         """종료 시 실행 중인 워커 안전하게 종료"""
